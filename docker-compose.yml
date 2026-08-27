@@ -1,0 +1,25 @@
+# byteln local stack: relay + static web (nginx)
+
+services:
+  relay:
+    build:
+      context: .
+      target: relay
+    ports:
+      - "8990:8990"
+    environment:
+      BYTELN_PORT: "8990"
+      BYTELN_IDLE_TTL: "10m"
+      BYTELN_BUFFER_TTL: "60s"
+      BYTELN_RECLAIM_TTL: "30s"
+
+  web:
+    build:
+      context: .
+      target: web
+      args:
+        PUBLIC_DEFAULT_RELAY: wss://byteln.dev
+    ports:
+      - "5173:80"
+    depends_on:
+      - relay

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
+  <!-- Signature / Two-Node Line — recommended byteln mark -->
+  <rect width="40" height="40" rx="9" fill="#0A0C0E"/>
+  <line x1="10" y1="20" x2="30" y2="20" stroke="#3DDCB0" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="10" cy="20" r="5.5" fill="#0A0C0E" stroke="#3DDCB0" stroke-width="3"/>
+  <circle cx="30" cy="20" r="5.5" fill="#0A0C0E" stroke="#3DDCB0" stroke-width="3"/>
+</svg>

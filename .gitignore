@@ -1,0 +1,24 @@
+# Binaries
+server/bin/
+bytelnd
+*.exe
+
+# Web
+web/node_modules/
+web/build/
+web/.svelte-kit/
+web/dist/
+
+# Env / IDE
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Go
+server/vendor/
+*.test
+coverage.out

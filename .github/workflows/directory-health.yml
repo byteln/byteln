@@ -1,0 +1,44 @@
+name: Directory health check
+
+on:
+  pull_request:
+    paths:
+      - 'directory/servers.json'
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: directory
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check relay /health endpoints
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+            const current = JSON.parse(fs.readFileSync('directory/servers.json', 'utf8'));
+            const failures = [];
+            for (const s of current) {
+              if (!s.url || s.url.includes('localhost')) {
+                console.log('skip', s.url);
+                continue;
+              }
+              const http = s.url.replace(/^ws/, 'http').replace(/\/$/, '');
+              const health = http + '/health';
+              try {
+                const res = execSync(`curl -fsS --max-time 8 "${health}"`, { encoding: 'utf8' });
+                console.log('OK', s.url, res.trim());
+              } catch (e) {
+                failures.push(`${s.url} (${health})`);
+                console.error('FAIL', s.url, e.message);
+              }
+            }
+            if (failures.length) {
+              core.setFailed('Unreachable relays:\n' + failures.join('\n'));
+            }

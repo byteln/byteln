@@ -1,0 +1,14 @@
+[
+  {
+    "url": "wss://byteln.dev",
+    "name": "byteln.dev",
+    "region": "global",
+    "maintainer": "github:byteln"
+  },
+  {
+    "url": "ws://127.0.0.1:8990",
+    "name": "Local Dev Relay",
+    "region": "local",
+    "maintainer": "github:byteln"
+  }
+]
