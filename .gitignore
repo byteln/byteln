@@ -1,6 +1,6 @@
-# Binaries
+# Binaries (do not ignore server/cmd/bytelnd — that is source)
 server/bin/
-bytelnd
+/bytelnd
 *.exe
 
 # Web

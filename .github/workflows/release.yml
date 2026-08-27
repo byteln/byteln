@@ -4,30 +4,38 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build/publish (e.g. v0.1.0). Leave empty to use the push tag.'
+        required: false
+        type: string
 
 permissions:
   contents: write
+
+env:
+  # All deps are local replaces under server/third_party — never hit the module proxy.
+  GOPROXY: off
+  GOSUMDB: off
+  GOTOOLCHAIN: local
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: server/go.mod
-          cache-dependency-path: |
-            server/go.mod
-            server/go.sum
+          cache: false
 
       - name: Test server
         working-directory: server
-        run: |
-          go mod download
-          go test ./internal/...
+        run: go test ./internal/...
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -43,14 +51,38 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Tag push → build that commit. Manual dispatch → build selected branch tip
+      # (so a re-release after a fix does not rebuild the old tag tip).
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.tag }}"
+            if [ -z "$VERSION" ]; then
+              echo "workflow_dispatch requires inputs.tag (e.g. v0.1.0)"
+              exit 1
+            fi
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          case "$VERSION" in
+            v*) ;;
+            *) echo "tag must look like v0.1.0, got: $VERSION"; exit 1 ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building $VERSION from $(git rev-parse --short HEAD)"
+
+      - uses: actions/setup-go@v6
         with:
           go-version-file: server/go.mod
-          cache-dependency-path: server/go.mod
+          cache: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -60,10 +92,10 @@ jobs:
         working-directory: server
         env:
           CGO_ENABLED: '0'
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          VERSION="${GITHUB_REF_NAME}"
           LDFLAGS="-s -w -X main.version=${VERSION}"
 
           build() {
@@ -83,18 +115,19 @@ jobs:
 
           cd dist
           sha256sum bytelnd_* > SHA256SUMS.txt
+          ls -la
           cat SHA256SUMS.txt
 
       - name: Build web static site
         working-directory: web
         env:
+          VERSION: ${{ steps.ver.outputs.version }}
           PUBLIC_DEFAULT_RELAY: wss://byteln.dev
           PUBLIC_DIRECTORY_URL: https://raw.githubusercontent.com/byteln/byteln/main/directory/servers.json
         run: |
           set -euo pipefail
           npm ci
           npm run build
-          VERSION="${GITHUB_REF_NAME}"
           mkdir -p ../server/dist
           tar -C build -czf "../server/dist/byteln-web_${VERSION}.tar.gz" .
           (cd ../server/dist && sha256sum "byteln-web_${VERSION}.tar.gz" >> SHA256SUMS.txt)
@@ -102,10 +135,11 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: byteln ${{ github.ref_name }}
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: byteln ${{ steps.ver.outputs.version }}
           draft: false
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             server/dist/bytelnd_*
             server/dist/byteln-web_*
@@ -122,8 +156,8 @@ jobs:
             ### Quick run
 
             ```bash
-            chmod +x bytelnd_${{ github.ref_name }}_linux_amd64
-            ./bytelnd_${{ github.ref_name }}_linux_amd64
+            chmod +x bytelnd_${{ steps.ver.outputs.version }}_linux_amd64
+            ./bytelnd_${{ steps.ver.outputs.version }}_linux_amd64
             # listens on :8990 by default (BYTELN_PORT / BYTELN_LISTEN)
             ```
         env:
