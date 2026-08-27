@@ -17,11 +17,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: server/go.mod
-          cache-dependency-path: server/go.mod
+          cache-dependency-path: |
+            server/go.mod
+            server/go.sum
 
       - name: Test server
         working-directory: server
-        run: go test ./internal/...
+        run: |
+          go mod download
+          go test ./internal/...
 
       - uses: actions/setup-node@v4
         with:

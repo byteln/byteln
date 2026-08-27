@@ -77,4 +77,4 @@ Artifacts land on the GitHub Release: `bytelnd_*` (linux/darwin/windows × amd64
 
 ## Go dependencies
 
-`server/third_party/` vendors `gobwas/ws` and `mailru/easygo` via `replace` directives for offline-friendly builds. When network allows, you can switch to module proxy versions and drop the replaces.
+Server vendors `gobwas/ws` and `mailru/easygo` under `server/third_party/` (plain files, via `go.mod` `replace`). This keeps CI/offline builds reliable without nested git submodules.
