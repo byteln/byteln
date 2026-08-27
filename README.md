@@ -64,9 +64,16 @@ See [`docs/operator.md`](docs/operator.md) for acceptable-use and metadata notes
 - Binary frames → opaque ciphertext (relayed)
 - Text frames from server → control (`peer_join` / `peer_leave` / `slot`)
 
-## E2E
+## Release
 
-See [`docs/e2e-checklist.md`](docs/e2e-checklist.md).
+Push a version tag to publish binaries + web tarball via GitHub Actions:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Artifacts land on the GitHub Release: `bytelnd_*` (linux/darwin/windows × amd64/arm64), `byteln-web_*.tar.gz`, and `SHA256SUMS.txt`.
 
 ## Go dependencies
 
