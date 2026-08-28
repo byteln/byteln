@@ -18,7 +18,7 @@ services:
       context: .
       target: web
       args:
-        PUBLIC_DEFAULT_RELAY: wss://byteln.dev
+        PUBLIC_DEFAULT_RELAY: wss://byteln.com
     ports:
       - "5173:80"
     depends_on:

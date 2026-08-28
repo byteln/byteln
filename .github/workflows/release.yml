@@ -122,7 +122,7 @@ jobs:
         working-directory: web
         env:
           VERSION: ${{ steps.ver.outputs.version }}
-          PUBLIC_DEFAULT_RELAY: wss://byteln.dev
+          PUBLIC_DEFAULT_RELAY: wss://byteln.com
           PUBLIC_DIRECTORY_URL: https://raw.githubusercontent.com/byteln/byteln/main/directory/servers.json
         run: |
           set -euo pipefail

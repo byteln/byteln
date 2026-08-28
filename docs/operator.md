@@ -35,6 +35,19 @@ Operators may adopt or adapt:
 4. The operator may terminate buckets or ban IPs based on reports and traffic patterns without decrypting anything.
 5. There is no global enforcement across the byteln directory — each instance is independent.
 
+## TLS / WSS (nginx)
+
+`bytelnd` speaks plain WS. Terminate TLS in front — see [`deploy/nginx-wss.conf`](../deploy/nginx-wss.conf) for a sample `wss://` reverse proxy (`/bucket/`, `/health`).
+
+## Process manager (PQPM)
+
+On a VPS with [PQPM](https://github.com/pqpm/pqpm), merge [`deploy/pqpm.toml`](../deploy/pqpm.toml) into `~/.pqpm.toml`, fix `USER` paths, then:
+
+```bash
+pqpm start bytelnd
+pqpm status
+```
+
 ## Reporting path
 
 Clients can open a `mailto:` report with the bucket ID only. Publish a contact address for your instance (README, `/`, or proxy landing page).
@@ -43,7 +56,7 @@ Clients can open a `mailto:` report with the bucket ID only. Publish a contact a
 
 `bytelnd` keeps an **in-memory** browser Origin allowlist (no database):
 
-1. Starts with embedded defaults (`https://byteln.dev`, localhost / 127.0.0.1).
+1. Starts with embedded defaults (`https://byteln.com`, localhost / 127.0.0.1).
 2. On startup (async) and every `BYTELN_CORS_REFRESH` (default 6h), fetches  
    `BYTELN_DIRECTORY_URL` (default: GitHub `directory/servers.json`).
 3. Derives allowed origins from each relay `url` (`wss://host` → `https://host`), plus optional per-entry `clients: ["https://…"]`.

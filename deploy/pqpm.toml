@@ -1,0 +1,18 @@
+# Example PQPM config for bytelnd.
+# Copy/merge into ~/.pqpm.toml and adjust paths for your user.
+# Docs: https://github.com/pqpm/pqpm
+#
+#   pqpm start bytelnd
+#   pqpm status
+#   pqpm log -f bytelnd
+#
+# Put TLS in front (see deploy/nginx-wss.conf). bytelnd itself listens on plain :8990.
+
+[service.bytelnd]
+command = "./bytelnd"
+restart = "always"
+max_memory = "512MB"
+cpu_limit = "50%"
+working_dir = "/home/byteln/bin"
+log_file = "/home/byteln/logs/bytelnd.log"
+env = { BYTELN_PORT = "8990", BYTELN_CORS_ORIGINS = "https://byteln.com,https://www.byteln.com" }

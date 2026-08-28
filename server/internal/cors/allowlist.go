@@ -21,8 +21,8 @@ const (
 
 // Embedded bootstrap origins used before (or if) the directory fetch fails.
 var embeddedOrigins = []string{
-	"https://byteln.dev",
-	"https://www.byteln.dev",
+	"https://byteln.com",
+	"https://www.byteln.com",
 	"http://localhost",
 	"http://127.0.0.1",
 	"http://[::1]",

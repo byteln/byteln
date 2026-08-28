@@ -5,7 +5,7 @@ export type DirectoryServer = {
 	maintainer?: string;
 };
 
-export const DEFAULT_PUBLIC_RELAY = 'wss://byteln.dev';
+export const DEFAULT_PUBLIC_RELAY = 'wss://byteln.com';
 export const DEFAULT_LOCAL_RELAY = 'ws://127.0.0.1:8990';
 
 const LOCAL_DEV: DirectoryServer = {
@@ -33,7 +33,7 @@ export function isLocalRelayUrl(url: string): boolean {
 	}
 }
 
-/** Default relay: local when UI is on localhost, otherwise byteln.dev. */
+/** Default relay: local when UI is on localhost, otherwise byteln.com. */
 export function defaultRelayUrl(envOverride?: string): string {
 	if (envOverride) return envOverride;
 	return isUiOnLocalhost() ? DEFAULT_LOCAL_RELAY : DEFAULT_PUBLIC_RELAY;
@@ -51,7 +51,7 @@ export function filterDirectoryForUi(servers: DirectoryServer[]): DirectoryServe
 		list = [
 			{
 				url: DEFAULT_PUBLIC_RELAY,
-				name: 'byteln.dev',
+				name: 'byteln.com',
 				region: 'global',
 				maintainer: 'github:byteln'
 			},

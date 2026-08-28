@@ -8,8 +8,8 @@ import (
 
 func TestOriginsFromRelayURL(t *testing.T) {
 	cases := map[string]string{
-		"wss://byteln.dev":           "https://byteln.dev",
-		"wss://byteln.dev/":          "https://byteln.dev",
+		"wss://byteln.com":           "https://byteln.com",
+		"wss://byteln.com/":          "https://byteln.com",
 		"ws://127.0.0.1:8990":        "http://127.0.0.1",
 		"ws://localhost:8990":        "http://localhost",
 		"https://evil.example/x":     "https://evil.example",
@@ -27,8 +27,8 @@ func TestOriginsFromRelayURL(t *testing.T) {
 
 func TestAllowlistEmbeddedAndExtra(t *testing.T) {
 	a := cors.New("https://example.invalid/nope.json", []string{"https://chat.example.com"})
-	if !a.Allow("https://byteln.dev") {
-		t.Fatal("embedded byteln.dev")
+	if !a.Allow("https://byteln.com") {
+		t.Fatal("embedded byteln.com")
 	}
 	if !a.Allow("http://localhost:5173") {
 		t.Fatal("localhost any port")
@@ -39,7 +39,7 @@ func TestAllowlistEmbeddedAndExtra(t *testing.T) {
 	if a.Allow("https://evil.example") {
 		t.Fatal("unknown should deny")
 	}
-	if a.CORSOrigin("https://byteln.dev") != "https://byteln.dev" {
+	if a.CORSOrigin("https://byteln.com") != "https://byteln.com" {
 		t.Fatal("cors echo")
 	}
 	if a.CORSOrigin("https://evil.example") != "" {

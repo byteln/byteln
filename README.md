@@ -44,7 +44,7 @@ make test
 docker compose up --build
 ```
 
-Relay defaults to `wss://byteln.dev` in production. On `localhost` / `127.0.0.1`, the UI also lists **Local Dev Relay** (`ws://127.0.0.1:8990`) and prefers that. Override with `BYTELN_PORT` / `BYTELN_LISTEN` or `PUBLIC_DEFAULT_RELAY`.
+Relay defaults to `wss://byteln.com` in production. On `localhost` / `127.0.0.1`, the UI also lists **Local Dev Relay** (`ws://127.0.0.1:8990`) and prefers that. Override with `BYTELN_PORT` / `BYTELN_LISTEN` or `PUBLIC_DEFAULT_RELAY`.
 
 CORS allowlist (in-memory): see [`docs/operator.md`](docs/operator.md). Env: `BYTELN_DIRECTORY_URL`, `BYTELN_CORS_ORIGINS`, `BYTELN_CORS_REFRESH`, `BYTELN_CHECK_WS_ORIGIN`.
 

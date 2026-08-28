@@ -80,7 +80,7 @@
 
 	<section class="server" aria-label="Relay server">
 		<label for="relay">Relay URL</label>
-		<input id="relay" bind:value={relay} placeholder="wss://byteln.dev" autocomplete="off" />
+		<input id="relay" bind:value={relay} placeholder="wss://byteln.com" autocomplete="off" />
 		{#if servers.length}
 			<ul class="dir">
 				{#each servers as s}
