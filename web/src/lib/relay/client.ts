@@ -1,15 +1,34 @@
 export type ControlHandler = (msg: { t: string; n?: number }) => void;
 export type BinaryHandler = (data: ArrayBuffer) => void;
-export type StatusHandler = (status: 'connecting' | 'open' | 'closed' | 'error', detail?: string) => void;
+export type StatusHandler = (
+	status: 'connecting' | 'open' | 'closed' | 'error' | 'reconnecting',
+	detail?: string
+) => void;
+
+export type RelayClientOptions = {
+	autoReconnect?: boolean;
+	maxReconnectDelayMs?: number;
+};
 
 export class RelayClient {
 	private ws: WebSocket | null = null;
 	private url: string;
+	private intentionalClose = false;
+	private reconnectAttempt = 0;
+	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	autoReconnect: boolean;
+	private maxReconnectDelayMs: number;
+
 	onControl: ControlHandler | null = null;
 	onBinary: BinaryHandler | null = null;
 	onStatus: StatusHandler | null = null;
 
-	constructor(relayBase: string, bucketId: string, token: string) {
+	constructor(
+		relayBase: string,
+		bucketId: string,
+		token: string,
+		opts: RelayClientOptions = {}
+	) {
 		const base = relayBase.replace(/\/$/, '');
 		const wsBase = base.startsWith('http')
 			? base.replace(/^http/, 'ws')
@@ -17,18 +36,38 @@ export class RelayClient {
 				? base
 				: `ws://${base}`;
 		this.url = `${wsBase}/bucket/${encodeURIComponent(bucketId)}?token=${encodeURIComponent(token)}`;
+		this.autoReconnect = opts.autoReconnect ?? true;
+		this.maxReconnectDelayMs = opts.maxReconnectDelayMs ?? 30_000;
 	}
 
 	connect() {
-		this.onStatus?.('connecting');
+		this.clearReconnectTimer();
+		if (this.ws) {
+			this.intentionalClose = true;
+			this.ws.close();
+			this.ws = null;
+			this.intentionalClose = false;
+		}
+
+		const isRetry = this.reconnectAttempt > 0;
+		this.onStatus?.(isRetry ? 'reconnecting' : 'connecting');
+
 		const ws = new WebSocket(this.url);
 		ws.binaryType = 'arraybuffer';
 		this.ws = ws;
-		ws.onopen = () => this.onStatus?.('open');
+
+		ws.onopen = () => {
+			this.reconnectAttempt = 0;
+			this.onStatus?.('open');
+		};
 		ws.onerror = () => this.onStatus?.('error', 'socket error');
 		ws.onclose = (ev) => {
+			this.ws = null;
 			const detail = ev.code === 4001 ? 'bucket full' : `closed ${ev.code}`;
 			this.onStatus?.('closed', detail);
+			if (!this.intentionalClose && ev.code !== 4001 && this.autoReconnect) {
+				this.scheduleReconnect();
+			}
 		};
 		ws.onmessage = (ev) => {
 			if (typeof ev.data === 'string') {
@@ -52,8 +91,29 @@ export class RelayClient {
 		}
 	}
 
+	get connected() {
+		return this.ws?.readyState === WebSocket.OPEN;
+	}
+
 	close() {
+		this.autoReconnect = false;
+		this.clearReconnectTimer();
+		this.intentionalClose = true;
 		this.ws?.close();
 		this.ws = null;
+	}
+
+	private scheduleReconnect() {
+		this.clearReconnectTimer();
+		const delay = Math.min(1000 * 2 ** this.reconnectAttempt, this.maxReconnectDelayMs);
+		this.reconnectAttempt++;
+		this.reconnectTimer = setTimeout(() => this.connect(), delay);
+	}
+
+	private clearReconnectTimer() {
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = null;
+		}
 	}
 }

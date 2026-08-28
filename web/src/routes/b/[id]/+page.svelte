@@ -33,11 +33,13 @@
 	import { onDestroy, onMount } from 'svelte';
 
 	const bucketId = $derived(page.params.id ?? '');
+	const SCROLL_THRESHOLD = 72;
 
 	let key = $state<CryptoKey | null>(null);
 	let messages = $state<StoredMessage[]>([]);
 	let draft = $state('');
-	let status = $state('idle');
+	let connState = $state<'connecting' | 'open' | 'closed' | 'error' | 'reconnecting'>('connecting');
+	let connDetail = $state('');
 	let peerPresent = $state(false);
 	let slot = $state<number | null>(null);
 	let error = $state('');
@@ -48,9 +50,87 @@
 	let reportNote = $state('');
 	let notifyPerm = $state<NotifyPermission>('unsupported');
 	let bucketFull = $state(false);
+	let infoOpen = $state(false);
+	let pinnedToBottom = $state(true);
 
 	let client: RelayClient | null = null;
-	let listEl: HTMLElement | null = null;
+	let listEl = $state<HTMLElement | null>(null);
+
+	const showScrollDown = $derived(!pinnedToBottom && messages.length > 0);
+
+	const presenceLabel = $derived.by(() => {
+		if (connState === 'connecting' || connState === 'reconnecting') {
+			return connState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…';
+		}
+		if (connState === 'closed' || connState === 'error') {
+			return 'Disconnected — retrying';
+		}
+		return peerPresent ? 'Partner connected' : 'Waiting for partner';
+	});
+
+	const presenceHint = $derived.by(() => {
+		if (connState === 'open' && peerPresent) return 'Your partner is in this chat.';
+		if (connState === 'open') return 'Share the link so they can join.';
+		if (connState === 'reconnecting' || connState === 'closed' || connState === 'error') {
+			return 'Trying to restore your connection automatically.';
+		}
+		return 'Opening a secure channel to the relay.';
+	});
+
+	function updateScrollPin() {
+		if (!listEl) return;
+		const { scrollTop, scrollHeight, clientHeight } = listEl;
+		pinnedToBottom = scrollHeight - scrollTop - clientHeight <= SCROLL_THRESHOLD;
+	}
+
+	function scrollToBottom(force = false) {
+		if (!listEl) return;
+		if (!force && !pinnedToBottom) return;
+		listEl.scrollTo({ top: listEl.scrollHeight, behavior: force ? 'smooth' : 'auto' });
+		pinnedToBottom = true;
+	}
+
+	function wireClient(c: RelayClient) {
+		c.onStatus = (s, detail) => {
+			connState = s;
+			connDetail = detail ?? '';
+			if (s === 'closed' && detail === 'bucket full') {
+				bucketFull = true;
+				c.close();
+				client = null;
+			}
+			if (s === 'closed' || s === 'error') {
+				peerPresent = false;
+			}
+		};
+		c.onControl = (msg) => {
+			if (msg.t === 'slot' && typeof msg.n === 'number') slot = msg.n;
+			if (msg.t === 'peer_join') {
+				peerPresent = true;
+				notifyPartnerJoined(bucketId);
+			}
+			if (msg.t === 'peer_leave') peerPresent = false;
+		};
+		c.onBinary = async (buf) => {
+			if (!key || bucketFull) return;
+			try {
+				const plain = await decryptMessage(key, buf);
+				const stored: StoredMessage = {
+					...plain,
+					id: crypto.randomUUID(),
+					from: 'peer'
+				};
+				messages = [...messages, stored];
+				await addMessage(bucketId, stored);
+				notifyPartnerMessage({ body: plain.body, bucketId });
+				queueMicrotask(() => scrollToBottom());
+			} catch (e) {
+				console.warn('byteln: decrypt failed', e);
+				error =
+					'Received bytes but could not decrypt — both sides need the same #key= in the URL.';
+			}
+		};
+	}
 
 	onMount(async () => {
 		notifyPerm = getNotifyPermission();
@@ -65,6 +145,8 @@
 			history.replaceState(null, '', `${location.pathname}#key=${keyToFragment(raw)}`);
 
 			messages = await listMessages(bucketId);
+			queueMicrotask(() => scrollToBottom(true));
+
 			let token = await getSessionToken(bucketId);
 			if (!token) {
 				token = randomToken();
@@ -75,40 +157,7 @@
 			const relay = await resolveRelayUrl(fallback);
 			relayUrl = relay;
 			client = new RelayClient(relay, bucketId, token);
-			client.onStatus = (s, detail) => {
-				status = detail ? `${s}: ${detail}` : s;
-				if (s === 'closed' && detail === 'bucket full') {
-					bucketFull = true;
-					client?.close();
-					client = null;
-				}
-			};
-			client.onControl = (msg) => {
-				if (msg.t === 'slot' && typeof msg.n === 'number') slot = msg.n;
-				if (msg.t === 'peer_join') {
-					peerPresent = true;
-					notifyPartnerJoined(bucketId);
-				}
-				if (msg.t === 'peer_leave') peerPresent = false;
-			};
-			client.onBinary = async (buf) => {
-				if (!key || bucketFull) return;
-				try {
-					const plain = await decryptMessage(key, buf);
-					const stored: StoredMessage = {
-						...plain,
-						id: crypto.randomUUID(),
-						from: 'peer'
-					};
-					messages = [...messages, stored];
-					await addMessage(bucketId, stored);
-					notifyPartnerMessage({ body: plain.body, bucketId });
-					queueMicrotask(scrollBottom);
-				} catch (e) {
-					console.warn('byteln: decrypt failed', e);
-					error = 'Received bytes but could not decrypt — both sides need the same #key= in the URL.';
-				}
-			};
+			wireClient(client);
 			client.connect();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'failed to start';
@@ -120,10 +169,6 @@
 	}
 	onDestroy(() => client?.close());
 
-	function scrollBottom() {
-		listEl?.scrollTo({ top: listEl.scrollHeight, behavior: 'smooth' });
-	}
-
 	async function send() {
 		const body = draft.trim();
 		if (!body || !key || !client) return;
@@ -134,7 +179,7 @@
 		messages = [...messages, stored];
 		draft = '';
 		await addMessage(bucketId, stored);
-		queueMicrotask(scrollBottom);
+		queueMicrotask(() => scrollToBottom(true));
 	}
 
 	function shareUrl(): string {
@@ -177,6 +222,21 @@
 			void send();
 		}
 	}
+
+	function connStateLabel(): string {
+		switch (connState) {
+			case 'open':
+				return 'Connected';
+			case 'connecting':
+				return 'Connecting';
+			case 'reconnecting':
+				return 'Reconnecting';
+			case 'error':
+				return 'Error';
+			default:
+				return 'Disconnected';
+		}
+	}
 </script>
 
 <main class="chat">
@@ -195,17 +255,24 @@
 	{:else}
 		<header>
 			<a href="/" class="back">byteln</a>
-			<div class="meta">
-				<span class="id">{bucketId}</span>
-				<span class="pill" class:on={peerPresent}
-					>{peerPresent ? 'partner here' : 'waiting for partner'}</span
-				>
-				<span class="stat">{status}</span>
-				{#if relayUrl}
-					<span class="stat" title="Relay">{relayUrl}</span>
-				{/if}
+			<div class="presence" class:live={connState === 'open' && peerPresent}>
+				<span class="presence-title">{presenceLabel}</span>
+				<span class="presence-hint">{presenceHint}</span>
 			</div>
 			<div class="actions">
+				<button
+					type="button"
+					class="icon-btn"
+					aria-expanded={infoOpen}
+					aria-label="Chat details"
+					title="Chat details"
+					onclick={() => (infoOpen = !infoOpen)}
+				>
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+						<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.75" />
+						<path d="M12 10v6M12 7h.01" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" />
+					</svg>
+				</button>
 				<button type="button" onclick={copyShare}>{shareOpen ? 'Copied' : 'Share link'}</button>
 				<button type="button" onclick={doExport}>Export</button>
 				{#if notifyPerm === 'default'}
@@ -216,18 +283,51 @@
 			</div>
 		</header>
 
+		{#if infoOpen}
+			<section class="info-panel" aria-label="Chat details">
+				<dl>
+					<div>
+						<dt>Bucket</dt>
+						<dd><code>{bucketId}</code></dd>
+					</div>
+					<div>
+						<dt>Relay</dt>
+						<dd><code>{relayUrl || '—'}</code></dd>
+					</div>
+					<div>
+						<dt>Connection</dt>
+						<dd>{connStateLabel()}{connDetail ? ` (${connDetail})` : ''}</dd>
+					</div>
+					{#if slot !== null}
+						<div>
+							<dt>Your slot</dt>
+							<dd>{slot === 0 ? 'A' : 'B'}</dd>
+						</div>
+					{/if}
+				</dl>
+			</section>
+		{/if}
+
 		{#if error}
 			<p class="err">{error}</p>
 		{/if}
 
-		<div class="list" bind:this={listEl}>
-			{#each messages as m (m.id)}
-				<article class:self={m.from === 'self'}>
-					<span class="who">{m.from === 'self' ? 'You' : 'Partner'}</span>
-					<p>{m.body}</p>
-					<time>{new Date(m.ts).toLocaleTimeString()}</time>
-				</article>
-			{/each}
+		<div class="list-wrap">
+			<div class="list" bind:this={listEl} onscroll={updateScrollPin}>
+				{#each messages as m (m.id)}
+					<article class:self={m.from === 'self'}>
+						<span class="who">{m.from === 'self' ? 'You' : 'Partner'}</span>
+						<p>{m.body}</p>
+						<time>{new Date(m.ts).toLocaleTimeString()}</time>
+					</article>
+				{/each}
+			</div>
+
+			{#if showScrollDown}
+				<button type="button" class="scroll-down" onclick={() => scrollToBottom(true)}>
+					New messages ↓
+				</button>
+			{/if}
 		</div>
 
 		<div class="dock">
@@ -243,9 +343,11 @@
 					rows="2"
 					placeholder="Message…"
 					onkeydown={onKey}
-					disabled={!key || !!error}
+					disabled={!key || !!error || connState !== 'open'}
 				></textarea>
-				<button type="submit" disabled={!draft.trim() || !key || !!error}>Send</button>
+				<button type="submit" disabled={!draft.trim() || !key || !!error || connState !== 'open'}
+					>Send</button
+				>
 			</form>
 
 			<details class="tools">
@@ -346,7 +448,7 @@
 		flex-shrink: 0;
 		display: flex;
 		flex-wrap: wrap;
-		align-items: center;
+		align-items: flex-start;
 		gap: 0.75rem;
 		justify-content: space-between;
 	}
@@ -359,34 +461,41 @@
 		color: var(--ink);
 	}
 
-	.meta {
+	.presence {
+		flex: 1;
+		min-width: 10rem;
 		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
-		align-items: center;
-		font-size: 0.85rem;
+		flex-direction: column;
+		gap: 0.15rem;
+	}
+
+	.presence-title {
+		font-size: 0.95rem;
+		font-weight: 600;
 		color: var(--muted);
 	}
 
-	.id {
-		font-family: ui-monospace, monospace;
-		color: var(--ink);
-	}
-
-	.pill {
-		border: 1px solid var(--line);
-		padding: 0.15rem 0.5rem;
-		border-radius: 999px;
-	}
-
-	.pill.on {
-		border-color: var(--accent-dim);
+	.presence.live .presence-title {
 		color: var(--accent);
+	}
+
+	.presence-hint {
+		font-size: 0.8rem;
+		color: var(--muted);
+		line-height: 1.35;
 	}
 
 	.actions {
 		display: flex;
 		gap: 0.4rem;
+		align-items: center;
+		flex-wrap: wrap;
+		justify-content: flex-end;
+	}
+
+	.stat {
+		font-size: 0.8rem;
+		color: var(--muted);
 	}
 
 	button {
@@ -399,10 +508,63 @@
 		color: var(--ink);
 	}
 
+	.icon-btn {
+		padding: 0.4rem;
+		line-height: 0;
+		color: var(--muted);
+	}
+
+	.icon-btn[aria-expanded='true'] {
+		border-color: var(--accent-dim);
+		color: var(--accent);
+	}
+
+	.info-panel {
+		flex-shrink: 0;
+		padding: 0.75rem 0.85rem;
+		border: 1px solid var(--line);
+		border-radius: 0.5rem;
+		background: rgba(18, 26, 23, 0.65);
+		font-size: 0.85rem;
+	}
+
+	.info-panel dl {
+		margin: 0;
+		display: grid;
+		gap: 0.55rem;
+	}
+
+	.info-panel dt {
+		font-size: 0.7rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--muted);
+		margin-bottom: 0.15rem;
+	}
+
+	.info-panel dd {
+		margin: 0;
+		color: var(--ink);
+		word-break: break-all;
+	}
+
+	.info-panel code {
+		font-family: ui-monospace, monospace;
+		font-size: 0.82rem;
+	}
+
 	.err {
 		flex-shrink: 0;
 		color: var(--danger);
 		margin: 0;
+	}
+
+	.list-wrap {
+		position: relative;
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
 	}
 
 	.list {
@@ -415,6 +577,22 @@
 		gap: 0.65rem;
 		padding: 0.25rem 0 0.5rem;
 		-webkit-overflow-scrolling: touch;
+	}
+
+	.scroll-down {
+		position: absolute;
+		left: 50%;
+		bottom: 0.5rem;
+		transform: translateX(-50%);
+		z-index: 2;
+		padding: 0.4rem 0.85rem;
+		border-radius: 999px;
+		background: rgba(10, 12, 14, 0.92);
+		border: 1px solid var(--accent-dim);
+		color: var(--accent);
+		font-size: 0.82rem;
+		font-weight: 600;
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
 	}
 
 	.dock {
