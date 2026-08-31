@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { APP_NAME } from '$lib/brand';
+	import { APP_NAME, SECURE_LINE } from '$lib/brand';
 	import SignatureMark from '$lib/components/SignatureMark.svelte';
 
 	type Props = {
@@ -7,6 +7,21 @@
 	};
 
 	let { onContinue }: Props = $props();
+
+	const steps = [
+		{
+			title: 'Set an app PIN',
+			body: 'Required once on this device. It locks your chat list and saved links — not stored on any server.'
+		},
+		{
+			title: `Start or join a ${SECURE_LINE}`,
+			body: 'Create a line and share the link + room PIN with one person, or open a link they sent you.'
+		},
+		{
+			title: 'Chat privately',
+			body: 'Messages are end-to-end encrypted. The relay only passes encrypted data — it never sees your keys or PINs.'
+		}
+	];
 </script>
 
 <div class="intro">
@@ -14,16 +29,27 @@
 		<SignatureMark size={96} />
 		<p class="brand">{APP_NAME}</p>
 	</div>
-	<h1>Two devices. One secure line. Nothing on the relay.</h1>
+	<h1>Private chat for two people</h1>
 	<p class="lede">
-		End-to-end encrypted chat for two people. Your messages and chat list stay on this device
-		only — the relay never sees keys or room PINs.
+		No accounts, no message history on the server. Everything you save stays on this device only.
 	</p>
-	<ul class="points">
-		<li>Share a link and room PIN separately with your partner</li>
-		<li>Protect saved chats with an app PIN on this device</li>
-		<li>No accounts — just a secure line between you two</li>
-	</ul>
+
+	<section class="how" aria-labelledby="how-title">
+		<h2 id="how-title">How it works</h2>
+		<ol class="steps">
+			{#each steps as step, i}
+				<li>
+					<span class="step-num" aria-hidden="true">{i + 1}</span>
+					<div class="step-body">
+						<strong>{step.title}</strong>
+						<p>{step.body}</p>
+					</div>
+				</li>
+			{/each}
+		</ol>
+	</section>
+
+	<p class="next">Tap continue to set up or unlock your app PIN.</p>
 	<button type="button" class="primary" onclick={onContinue}>Continue</button>
 </div>
 
@@ -77,7 +103,7 @@
 		font-size: clamp(1.35rem, 3.5vw, 1.85rem);
 		line-height: 1.2;
 		margin: 0;
-		max-width: 18ch;
+		max-width: 20ch;
 	}
 
 	.lede {
@@ -85,18 +111,71 @@
 		color: var(--muted);
 		font-size: 1.05rem;
 		line-height: 1.55;
-		max-width: 40ch;
+		max-width: 42ch;
 	}
 
-	.points {
-		margin: 0;
-		padding-left: 1.2rem;
+	.how {
+		margin-top: 0.25rem;
+	}
+
+	.how h2 {
+		margin: 0 0 0.75rem;
+		font-size: 0.8rem;
+		font-weight: 600;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
 		color: var(--muted);
-		font-size: 0.95rem;
-		line-height: 1.6;
+	}
+
+	.steps {
+		margin: 0;
+		padding: 0;
+		list-style: none;
 		display: flex;
 		flex-direction: column;
-		gap: 0.35rem;
+		gap: 0.85rem;
+	}
+
+	.steps li {
+		display: flex;
+		gap: 0.85rem;
+		align-items: flex-start;
+		padding: 0.85rem 1rem;
+		border-radius: 0.5rem;
+		border: 1px solid var(--line);
+		background: rgba(18, 26, 23, 0.45);
+	}
+
+	.step-num {
+		flex-shrink: 0;
+		width: 1.65rem;
+		height: 1.65rem;
+		display: grid;
+		place-items: center;
+		border-radius: 999px;
+		background: var(--accent-dim);
+		color: var(--accent);
+		font-size: 0.85rem;
+		font-weight: 700;
+	}
+
+	.step-body strong {
+		display: block;
+		font-size: 0.95rem;
+		margin-bottom: 0.2rem;
+	}
+
+	.step-body p {
+		margin: 0;
+		font-size: 0.88rem;
+		line-height: 1.45;
+		color: var(--muted);
+	}
+
+	.next {
+		margin: 0;
+		font-size: 0.9rem;
+		color: var(--muted);
 	}
 
 	.primary {
@@ -109,7 +188,6 @@
 		background: var(--accent);
 		color: #06110d;
 		font-weight: 600;
-		margin-top: 0.5rem;
 	}
 
 	@media (prefers-reduced-motion: reduce) {

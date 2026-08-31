@@ -38,7 +38,7 @@
 	} from '$lib/storage/history';
 	import { APP_NAME, LINE_ID_LABEL, partnerDisplayName, SECURE_LINE } from '$lib/brand';
 	import { bumpRooms, roomsRevision } from '$lib/stores/conversations';
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 
 	const bucketId = $derived(page.params.id ?? '');
 	const SCROLL_THRESHOLD = 72;
@@ -82,6 +82,16 @@
 	const partnerLabelText = $derived(partnerDisplayName(nickname, bucketId));
 
 	const showScrollDown = $derived(!pinnedToBottom && messages.length > 0);
+
+	$effect(() => {
+		if (phase !== 'chat') return;
+		const lastId = messages.at(-1)?.id;
+		if (!lastId || !pinnedToBottom) return;
+		void tick().then(() => {
+			if (!listEl || !pinnedToBottom) return;
+			listEl.scrollTo({ top: listEl.scrollHeight, behavior: 'auto' });
+		});
+	});
 
 	const presenceLabel = $derived.by(() => {
 		if (phase !== 'chat') return 'Enter room PIN';
