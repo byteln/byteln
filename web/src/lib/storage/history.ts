@@ -1,9 +1,35 @@
 import type { StoredMessage } from '$lib/crypto/backup';
+import type { EncryptedBlob } from '$lib/crypto/vault';
+
+import { defaultLineNickname } from '$lib/brand';
 
 const DB_NAME = 'byteln';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE = 'messages';
 const META = 'meta';
+const ROOMS = 'rooms';
+
+export type RoomRecord = {
+	bucketId: string;
+	/** Local label for your partner in this chat (only on this device). */
+	nickname: string;
+	/** URL fragment (#key=…) — needed to reopen this chat from the list. */
+	roomHash: string;
+	relayUrl: string;
+	createdAt: number;
+	lastActiveAt: number;
+	lastPreview?: string;
+	unread?: boolean;
+	credentialsEnc?: EncryptedBlob;
+	legacy?: boolean;
+	/** True when you created this room (seat 0) — can reshare the room PIN. */
+	isCreator?: boolean;
+};
+
+export function partnerLabel(rec: RoomRecord | null | undefined): string {
+	if (!rec) return 'Partner';
+	return rec.nickname.trim() || 'Partner';
+}
 
 function openDb(): Promise<IDBDatabase> {
 	return new Promise((resolve, reject) => {
@@ -17,6 +43,9 @@ function openDb(): Promise<IDBDatabase> {
 			if (!db.objectStoreNames.contains(META)) {
 				db.createObjectStore(META, { keyPath: 'key' });
 			}
+			if (!db.objectStoreNames.contains(ROOMS)) {
+				db.createObjectStore(ROOMS, { keyPath: 'bucketId' });
+			}
 		};
 		req.onsuccess = () => resolve(req.result);
 		req.onerror = () => reject(req.error);
@@ -24,6 +53,10 @@ function openDb(): Promise<IDBDatabase> {
 }
 
 type Row = StoredMessage & { pk: string; bucketId: string };
+
+export function defaultNickname(bucketId: string): string {
+	return defaultLineNickname(bucketId);
+}
 
 export async function listMessages(bucketId: string): Promise<StoredMessage[]> {
 	const db = await openDb();
@@ -60,8 +93,21 @@ export async function mergeMessages(bucketId: string, msgs: StoredMessage[]): Pr
 	}
 }
 
+export async function deleteMessagesForBucket(bucketId: string): Promise<void> {
+	const db = await openDb();
+	const existing = await listMessages(bucketId);
+	return new Promise((resolve, reject) => {
+		const tx = db.transaction(STORE, 'readwrite');
+		const store = tx.objectStore(STORE);
+		for (const m of existing) {
+			store.delete(`${bucketId}:${m.id}`);
+		}
+		tx.oncomplete = () => resolve();
+		tx.onerror = () => reject(tx.error);
+	});
+}
+
 export async function getSessionToken(bucketId: string): Promise<string | null> {
-	// Per-tab storage so two tabs (or refresh reclaim) don't steal each other's slot.
 	try {
 		return sessionStorage.getItem(`byteln:token:${bucketId}`);
 	} catch {
@@ -73,33 +119,52 @@ export async function setSessionToken(bucketId: string, token: string): Promise<
 	try {
 		sessionStorage.setItem(`byteln:token:${bucketId}`, token);
 	} catch {
-		/* private mode quirks — token still used in-memory this session */
+		/* private mode */
 	}
 }
 
-export async function getRelayUrl(): Promise<string | null> {
+export function clearRoomSessionStorage(bucketId: string): void {
+	try {
+		sessionStorage.removeItem(`byteln:token:${bucketId}`);
+		sessionStorage.removeItem(`byteln:pin-once:${bucketId}`);
+	} catch {
+		/* private mode */
+	}
+}
+
+export async function getMetaEntry(key: string): Promise<{ key: string; value: string } | undefined> {
 	const db = await openDb();
 	return new Promise((resolve, reject) => {
 		const tx = db.transaction(META, 'readonly');
-		const req = tx.objectStore(META).get('relayUrl');
-		req.onsuccess = () => {
-			const row = req.result as { key: string; value: string } | undefined;
-			resolve(row?.value ?? null);
-		};
+		const req = tx.objectStore(META).get(key);
+		req.onsuccess = () => resolve(req.result as { key: string; value: string } | undefined);
 		req.onerror = () => reject(req.error);
 	});
+}
+
+export async function setMetaEntry(key: string, value: string): Promise<void> {
+	const db = await openDb();
+	return new Promise((resolve, reject) => {
+		const tx = db.transaction(META, 'readwrite');
+		tx.objectStore(META).put({ key, value });
+		tx.oncomplete = () => resolve();
+		tx.onerror = () => reject(tx.error);
+	});
+}
+
+export async function getRelayUrl(): Promise<string | null> {
+	const row = await getMetaEntry('relayUrl');
+	return row?.value ?? null;
 }
 
 /** Resolve relay URL, migrating stale local defaults. */
 export async function resolveRelayUrl(fallback: string): Promise<string> {
 	const saved = await getRelayUrl();
 	if (!saved) return fallback;
-	// Old defaults before port / public host changes.
 	if (
 		/localhost:8080|127\.0\.0\.1:8080|localhost:8990|127\.0\.0\.1:8990/.test(saved) &&
 		!/localhost|127\.0\.0\.1/.test(fallback)
 	) {
-		// Saved local relay but UI is no longer on localhost — prefer public default.
 		await setRelayUrl(fallback);
 		return fallback;
 	}
@@ -111,11 +176,130 @@ export async function resolveRelayUrl(fallback: string): Promise<string> {
 }
 
 export async function setRelayUrl(url: string): Promise<void> {
+	await setMetaEntry('relayUrl', url.trim());
+}
+
+const INTRO_SEEN_KEY = 'introSeen';
+
+export async function hasSeenIntro(): Promise<boolean> {
+	const row = await getMetaEntry(INTRO_SEEN_KEY);
+	return row?.value === '1';
+}
+
+export async function markIntroSeen(): Promise<void> {
+	await setMetaEntry(INTRO_SEEN_KEY, '1');
+}
+
+export async function upsertRoom(record: RoomRecord): Promise<void> {
 	const db = await openDb();
 	return new Promise((resolve, reject) => {
-		const tx = db.transaction(META, 'readwrite');
-		tx.objectStore(META).put({ key: 'relayUrl', value: url });
+		const tx = db.transaction(ROOMS, 'readwrite');
+		tx.objectStore(ROOMS).put(record);
 		tx.oncomplete = () => resolve();
 		tx.onerror = () => reject(tx.error);
 	});
+}
+
+export async function getRoom(bucketId: string): Promise<RoomRecord | null> {
+	const db = await openDb();
+	return new Promise((resolve, reject) => {
+		const tx = db.transaction(ROOMS, 'readonly');
+		const req = tx.objectStore(ROOMS).get(bucketId);
+		req.onsuccess = () => resolve((req.result as RoomRecord | undefined) ?? null);
+		req.onerror = () => reject(req.error);
+	});
+}
+
+export async function listRooms(): Promise<RoomRecord[]> {
+	const db = await openDb();
+	return new Promise((resolve, reject) => {
+		const tx = db.transaction(ROOMS, 'readonly');
+		const req = tx.objectStore(ROOMS).getAll();
+		req.onsuccess = () => {
+			const rows = (req.result as RoomRecord[]).sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+			resolve(rows);
+		};
+		req.onerror = () => reject(req.error);
+	});
+}
+
+export async function setNickname(bucketId: string, nickname: string): Promise<void> {
+	const room = await getRoom(bucketId);
+	if (!room) return;
+	await upsertRoom({ ...room, nickname: nickname.trim() || defaultNickname(bucketId) });
+}
+
+export async function markUnread(bucketId: string, unread = true): Promise<void> {
+	const room = await getRoom(bucketId);
+	if (!room) return;
+	await upsertRoom({ ...room, unread });
+}
+
+export async function markRead(bucketId: string): Promise<void> {
+	const room = await getRoom(bucketId);
+	if (!room || !room.unread) return;
+	await upsertRoom({ ...room, unread: false });
+}
+
+export async function touchRoom(bucketId: string, preview?: string): Promise<void> {
+	const room = await getRoom(bucketId);
+	if (!room) return;
+	await upsertRoom({
+		...room,
+		lastActiveAt: Date.now(),
+		...(preview !== undefined ? { lastPreview: preview.slice(0, 120) } : {})
+	});
+}
+
+export async function removeRoom(bucketId: string): Promise<void> {
+	const db = await openDb();
+	return new Promise((resolve, reject) => {
+		const tx = db.transaction(ROOMS, 'readwrite');
+		tx.objectStore(ROOMS).delete(bucketId);
+		tx.oncomplete = () => resolve();
+		tx.onerror = () => reject(tx.error);
+	});
+}
+
+export async function saveRoomCredentials(
+	bucketId: string,
+	patch: Partial<Pick<RoomRecord, 'credentialsEnc' | 'relayUrl' | 'legacy'>>
+): Promise<void> {
+	const room = await getRoom(bucketId);
+	if (!room) return;
+	await upsertRoom({ ...room, ...patch });
+}
+
+/** Remove all byteln keys from sessionStorage (relay tokens, one-time PINs, etc.). */
+export function clearBytelnSessionStorage(): void {
+	try {
+		const keys: string[] = [];
+		for (let i = 0; i < sessionStorage.length; i++) {
+			const key = sessionStorage.key(i);
+			if (key?.startsWith('byteln:')) keys.push(key);
+		}
+		for (const key of keys) sessionStorage.removeItem(key);
+	} catch {
+		/* private mode */
+	}
+}
+
+/** Wipe IndexedDB — chats, messages, app PIN vault, relay preference. */
+export async function clearAllLocalData(): Promise<void> {
+	let db: IDBDatabase | null = null;
+	try {
+		db = await openDb();
+	} catch {
+		/* already gone */
+	}
+	if (db) {
+		db.close();
+		await new Promise<void>((resolve, reject) => {
+			const req = indexedDB.deleteDatabase(DB_NAME);
+			req.onsuccess = () => resolve();
+			req.onerror = () => reject(req.error);
+			req.onblocked = () => resolve();
+		});
+	}
+	clearBytelnSessionStorage();
 }

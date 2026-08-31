@@ -1,12 +1,18 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { env } from '$env/dynamic/public';
 	import {
 		importHistory,
 		type ExportFile,
 		type StoredMessage
 	} from '$lib/crypto/backup';
+	import { parseRoomFragment } from '$lib/crypto/room';
+	import { connectionManager } from '$lib/relay/connection-manager';
 	import { base64UrlToBytes, importKeyRaw, keyFromFragment, keyToFragment } from '$lib/crypto/session';
-	import { mergeMessages } from '$lib/storage/history';
+	import { defaultRelayUrl } from '$lib/servers/directory';
+	import { defaultNickname, mergeMessages, resolveRelayUrl } from '$lib/storage/history';
+	import { APP_NAME } from '$lib/brand';
+	import { bumpRooms } from '$lib/stores/conversations';
 
 	let file = $state<ExportFile | null>(null);
 	let passphrase = $state('');
@@ -68,14 +74,26 @@
 			error = 'Need session key in fragment to reconnect live.';
 			return;
 		}
+		const fallback = defaultRelayUrl(env.PUBLIC_DEFAULT_RELAY);
+		const relayUrl = await resolveRelayUrl(fallback);
+		const fragment = parseRoomFragment(frag);
+		await connectionManager.registerRoom({
+			bucketId,
+			roomHash: frag,
+			relayUrl,
+			nickname: defaultNickname(bucketId),
+			isCreator: fragment?.seat === 0
+		});
+		bumpRooms();
 		await goto(`/b/${bucketId}${frag}`);
 	}
 </script>
 
 <main class="import">
-	<a href="/" class="brand">byteln</a>
+	<a href="/" class="brand">{APP_NAME}</a>
 	<h1>Import history</h1>
 	<p class="lede">Decrypt a portable export into this device’s local store.</p>
+	<p class="note">To reconnect live, use the full share link (includes <code>#key=</code> and room PIN fields).</p>
 
 	<label class="file">
 		<span>Export file</span>
@@ -99,7 +117,7 @@
 	{/if}
 	{#if ok}
 		<p class="ok">{ok}</p>
-		<button type="button" onclick={reconnect}>Reconnect to bucket</button>
+		<button type="button" onclick={reconnect}>Reconnect to secure line</button>
 	{/if}
 </main>
 
@@ -132,6 +150,18 @@
 	.lede {
 		margin: 0;
 		color: var(--muted);
+	}
+
+	.note {
+		margin: 0;
+		font-size: 0.9rem;
+		color: var(--muted);
+		line-height: 1.45;
+	}
+
+	.note code {
+		font-family: ui-monospace, monospace;
+		font-size: 0.85em;
 	}
 
 	label {

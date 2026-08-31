@@ -1,22 +1,30 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { env } from '$env/dynamic/public';
-	import SignatureMark from '$lib/components/SignatureMark.svelte';
+	import ConversationTabs from '$lib/components/ConversationTabs.svelte';
+	import DeviceSettings from '$lib/components/DeviceSettings.svelte';
+	import { SECURE_LINE } from '$lib/brand';
+	import {
+		buildRoomHash,
+		createPinVerifier,
+		generatePinSalt,
+		generateRoomPin,
+		stashCreatorPin
+	} from '$lib/crypto/room';
 	import {
 		exportKeyRaw,
 		generateSessionKey,
-		keyToFragment,
 		randomBucketId
 	} from '$lib/crypto/session';
+	import { connectionManager } from '$lib/relay/connection-manager';
 	import { defaultRelayUrl, loadDirectory, pingServer, type DirectoryServer } from '$lib/servers/directory';
-	import { resolveRelayUrl, setRelayUrl } from '$lib/storage/history';
+	import { defaultNickname, resolveRelayUrl, setRelayUrl } from '$lib/storage/history';
 	import { onMount } from 'svelte';
 
 	let relay = $state('');
 	let servers = $state<DirectoryServer[]>([]);
 	let health = $state<Record<string, boolean | null>>({});
 	let busy = $state(false);
-	let joinId = $state('');
 
 	onMount(async () => {
 		const fallback = defaultRelayUrl(env.PUBLIC_DEFAULT_RELAY);
@@ -41,18 +49,23 @@
 			const id = randomBucketId();
 			const key = await generateSessionKey();
 			const raw = await exportKeyRaw(key);
-			const frag = keyToFragment(raw);
-			await goto(`/b/${id}#key=${frag}`);
+			const pin = generateRoomPin();
+			const salt = generatePinSalt();
+			const pv = await createPinVerifier(pin, salt, id);
+			const hash = buildRoomHash({ keyRaw: raw, pv, salt, seat: 0 });
+			stashCreatorPin(id, pin);
+			await connectionManager.registerRoom({
+				bucketId: id,
+				roomHash: hash,
+				relayUrl: relay.trim(),
+				roomPin: pin,
+				nickname: defaultNickname(id),
+				isCreator: true
+			});
+			await goto(`/b/${id}${hash}`);
 		} finally {
 			busy = false;
 		}
-	}
-
-	async function joinChat() {
-		const id = joinId.trim().toLowerCase();
-		if (!id) return;
-		await persistRelay();
-		await goto(`/b/${id}`);
 	}
 
 	function selectServer(url: string) {
@@ -61,19 +74,14 @@
 </script>
 
 <main class="home">
-	<div class="lockup" aria-label="byteln">
-		<SignatureMark size={96} />
-		<p class="brand">byteln</p>
-	</div>
-	<h1>Two devices. Encrypted bytes. Nothing stored.</h1>
-	<p class="lede">
-		A self-hostable relay that never sees plaintext. Create a bucket, share the link — the key lives
-		only in the URL fragment.
-	</p>
+	<h1>Your secure lines</h1>
+	<p class="lede">Start a new {SECURE_LINE.toLowerCase()} or open one from your list.</p>
+
+	<ConversationTabs variant="home" />
 
 	<div class="cta">
 		<button type="button" class="primary" disabled={busy} onclick={startChat}>
-			{busy ? 'Opening…' : 'New chat'}
+			{busy ? 'Opening…' : `New ${SECURE_LINE.toLowerCase()}`}
 		</button>
 		<a class="ghost" href="/import">Import history</a>
 	</div>
@@ -102,14 +110,9 @@
 		{/if}
 	</section>
 
-	<section class="join" aria-label="Join existing">
-		<label for="join">Or join by bucket ID</label>
-		<div class="row">
-			<input id="join" bind:value={joinId} placeholder="xk3n9d2a" autocomplete="off" />
-			<button type="button" class="secondary" onclick={joinChat}>Join</button>
-		</div>
-		<p class="hint">If you have a full share link, open it directly — it includes the key.</p>
-	</section>
+	<p class="hint">To join, open the link your partner sent — then enter the room PIN.</p>
+
+	<DeviceSettings />
 </main>
 
 <style>
@@ -136,33 +139,12 @@
 		}
 	}
 
-	.lockup {
-		display: flex;
-		align-items: center;
-		gap: 1rem;
-		flex-wrap: wrap;
-	}
-
-	.brand {
-		font-family: var(--font-display);
-		font-weight: 800;
-		font-size: clamp(2.8rem, 10vw, 4.5rem);
-		letter-spacing: -0.04em;
-		line-height: 0.95;
-		margin: 0;
-		background: linear-gradient(120deg, var(--ink) 30%, var(--accent));
-		-webkit-background-clip: text;
-		background-clip: text;
-		color: transparent;
-	}
-
 	h1 {
 		font-family: var(--font-display);
 		font-weight: 700;
 		font-size: clamp(1.35rem, 3.5vw, 1.85rem);
 		line-height: 1.2;
 		margin: 0;
-		max-width: 18ch;
 	}
 
 	.lede {
@@ -170,7 +152,7 @@
 		color: var(--muted);
 		font-size: 1.05rem;
 		line-height: 1.55;
-		max-width: 36ch;
+		max-width: 40ch;
 	}
 
 	.cta {
@@ -213,14 +195,7 @@
 		border-color: var(--line);
 	}
 
-	.secondary {
-		background: transparent;
-		color: var(--ink);
-		border-color: var(--line);
-	}
-
-	.server,
-	.join {
+	.server {
 		margin-top: 1.5rem;
 		display: flex;
 		flex-direction: column;
@@ -242,11 +217,6 @@
 		background: rgba(18, 26, 23, 0.8);
 		color: var(--ink);
 		width: 100%;
-	}
-
-	.row {
-		display: flex;
-		gap: 0.5rem;
 	}
 
 	.dir {

@@ -27,6 +27,7 @@ export class RelayClient {
 		relayBase: string,
 		bucketId: string,
 		token: string,
+		deviceSessionId: string,
 		opts: RelayClientOptions = {}
 	) {
 		const base = relayBase.replace(/\/$/, '');
@@ -35,7 +36,9 @@ export class RelayClient {
 			: base.startsWith('ws')
 				? base
 				: `ws://${base}`;
-		this.url = `${wsBase}/bucket/${encodeURIComponent(bucketId)}?token=${encodeURIComponent(token)}`;
+		const params = new URLSearchParams({ token });
+		if (deviceSessionId) params.set('sid', deviceSessionId);
+		this.url = `${wsBase}/bucket/${encodeURIComponent(bucketId)}?${params.toString()}`;
 		this.autoReconnect = opts.autoReconnect ?? true;
 		this.maxReconnectDelayMs = opts.maxReconnectDelayMs ?? 30_000;
 	}
@@ -93,6 +96,32 @@ export class RelayClient {
 
 	get connected() {
 		return this.ws?.readyState === WebSocket.OPEN;
+	}
+
+	/** Close and wait for the relay to release the seat (like a page refresh). */
+	closeAndWait(timeoutMs = 2500): Promise<void> {
+		this.autoReconnect = false;
+		this.clearReconnectTimer();
+		const ws = this.ws;
+		if (!ws || ws.readyState === WebSocket.CLOSED) {
+			this.intentionalClose = true;
+			this.ws = null;
+			return Promise.resolve();
+		}
+		return new Promise((resolve) => {
+			let settled = false;
+			const finish = () => {
+				if (settled) return;
+				settled = true;
+				this.intentionalClose = true;
+				this.ws = null;
+				resolve();
+			};
+			ws.addEventListener('close', () => finish(), { once: true });
+			this.intentionalClose = true;
+			ws.close();
+			setTimeout(finish, timeoutMs);
+		});
 	}
 
 	close() {

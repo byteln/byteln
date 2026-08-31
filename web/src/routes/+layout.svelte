@@ -1,5 +1,6 @@
 <script lang="ts">
 	import favicon from '$lib/assets/favicon.svg';
+	import VaultGate from '$lib/components/VaultGate.svelte';
 	import { onMount } from 'svelte';
 
 	let { children } = $props();
@@ -23,7 +24,9 @@
 
 <div class="shell">
 	<div class="glow" aria-hidden="true"></div>
-	{@render children()}
+	<VaultGate>
+		{@render children()}
+	</VaultGate>
 </div>
 
 <style>

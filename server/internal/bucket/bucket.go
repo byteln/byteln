@@ -19,10 +19,11 @@ type BufferedFrame struct {
 }
 
 type Peer struct {
-	Conn     any // *websocket-like; opaque to bucket logic
-	Token    string
-	LastSeen time.Time
-	IP       string
+	Conn            any // *websocket-like; opaque to bucket logic
+	Token           string
+	DeviceSessionID string
+	LastSeen        time.Time
+	IP              string
 	// DroppedAt is set when the peer disconnects; empty while connected.
 	DroppedAt time.Time
 	Connected bool
@@ -71,9 +72,9 @@ type JoinResult struct {
 	Reason   string // "full" | "rate" etc — caller maps to close code
 }
 
-// Join attaches a peer to a bucket, reclaiming by token when possible.
+// Join attaches a peer to a bucket, reclaiming by token+device session when possible.
 // conn is stored opaquely; Connected=true.
-func (r *Registry) Join(id, token, ip string, conn any) JoinResult {
+func (r *Registry) Join(id, token, deviceSessionID, ip string, conn any) JoinResult {
 	now := r.cfg.Now()
 	r.mu.Lock()
 	b, exists := r.m[id]
@@ -90,11 +91,12 @@ func (r *Registry) Join(id, token, ip string, conn any) JoinResult {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		b.Peers[0] = &Peer{
-			Conn:      conn,
-			Token:     token,
-			LastSeen:  now,
-			IP:        ip,
-			Connected: true,
+			Conn:            conn,
+			Token:           token,
+			DeviceSessionID: deviceSessionID,
+			LastSeen:        now,
+			IP:              ip,
+			Connected:       true,
 		}
 		return JoinResult{Bucket: b, Slot: 0, Created: true}
 	}
@@ -104,31 +106,43 @@ func (r *Registry) Join(id, token, ip string, conn any) JoinResult {
 	defer b.mu.Unlock()
 	b.LastSeen = now
 
-	// Reclaim existing slot by token.
+	// Reclaim existing slot by token (+ device session when present).
 	if token != "" {
 		for i, p := range b.Peers {
 			if p == nil || p.Token != token {
 				continue
 			}
-			if p.Connected {
-				// Same token reconnect while still marked connected: replace conn.
+			seatHeld := peerSeatHeld(p, now, r.cfg.ReclaimTTL)
+
+			if isThirdPartyCredentialUse(p, deviceSessionID) && seatHeld {
+				return JoinResult{Rejected: true, Reason: "full", Bucket: b}
+			}
+
+			if deviceSessionMatches(p, deviceSessionID) && p.Connected {
 				p.Conn = conn
 				p.LastSeen = now
 				p.DroppedAt = time.Time{}
 				p.Connected = true
 				p.IP = ip
+				if deviceSessionID != "" {
+					p.DeviceSessionID = deviceSessionID
+				}
 				return JoinResult{Bucket: b, Slot: i}
 			}
-			if !p.DroppedAt.IsZero() && now.Sub(p.DroppedAt) <= r.cfg.ReclaimTTL {
+
+			if deviceSessionMatches(p, deviceSessionID) && !p.DroppedAt.IsZero() && now.Sub(p.DroppedAt) <= r.cfg.ReclaimTTL {
 				p.Conn = conn
 				p.LastSeen = now
 				p.DroppedAt = time.Time{}
 				p.Connected = true
 				p.IP = ip
+				if deviceSessionID != "" {
+					p.DeviceSessionID = deviceSessionID
+				}
 				return JoinResult{Bucket: b, Slot: i}
 			}
-			// Grace expired — fall through to find a free slot (may be this one).
-			if now.Sub(p.DroppedAt) > r.cfg.ReclaimTTL {
+
+			if !p.Connected && !peerSeatHeld(p, now, r.cfg.ReclaimTTL) {
 				b.Peers[i] = nil
 			}
 		}
@@ -139,27 +153,54 @@ func (r *Registry) Join(id, token, ip string, conn any) JoinResult {
 		p := b.Peers[i]
 		if p == nil {
 			b.Peers[i] = &Peer{
-				Conn:      conn,
-				Token:     token,
-				LastSeen:  now,
-				IP:        ip,
-				Connected: true,
+				Conn:            conn,
+				Token:           token,
+				DeviceSessionID: deviceSessionID,
+				LastSeen:        now,
+				IP:              ip,
+				Connected:       true,
 			}
 			return JoinResult{Bucket: b, Slot: i}
 		}
-		if !p.Connected && (p.DroppedAt.IsZero() || now.Sub(p.DroppedAt) > r.cfg.ReclaimTTL) {
+		if !p.Connected && !peerSeatHeld(p, now, r.cfg.ReclaimTTL) {
 			b.Peers[i] = &Peer{
-				Conn:      conn,
-				Token:     token,
-				LastSeen:  now,
-				IP:        ip,
-				Connected: true,
+				Conn:            conn,
+				Token:           token,
+				DeviceSessionID: deviceSessionID,
+				LastSeen:        now,
+				IP:              ip,
+				Connected:       true,
 			}
 			return JoinResult{Bucket: b, Slot: i}
 		}
 	}
 
 	return JoinResult{Rejected: true, Reason: "full", Bucket: b}
+}
+
+func peerSeatHeld(p *Peer, now time.Time, reclaimTTL time.Duration) bool {
+	if p.Connected {
+		return true
+	}
+	return !p.DroppedAt.IsZero() && now.Sub(p.DroppedAt) <= reclaimTTL
+}
+
+func deviceSessionMatches(p *Peer, deviceSessionID string) bool {
+	if deviceSessionID == "" && p.DeviceSessionID == "" {
+		return true
+	}
+	// Legacy peer (no sid stored yet) — allow reclaim and adopt the new sid.
+	if p.DeviceSessionID == "" && deviceSessionID != "" {
+		return true
+	}
+	if deviceSessionID == "" || p.DeviceSessionID == "" {
+		return false
+	}
+	return p.DeviceSessionID == deviceSessionID
+}
+
+func isThirdPartyCredentialUse(p *Peer, deviceSessionID string) bool {
+	return p.DeviceSessionID != "" && deviceSessionID != "" && p.DeviceSessionID != deviceSessionID
 }
 
 // Leave marks a peer disconnected. Returns whether the bucket should be deleted

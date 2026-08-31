@@ -33,7 +33,7 @@ cd server && go run ./cmd/bytelnd
 cd web && PUBLIC_DEFAULT_RELAY=ws://127.0.0.1:8990 npm run dev
 ```
 
-Open the app, create a chat, share the link (includes `#key=…` fragment — never sent to the server).
+Open the app, create a chat, share the link and room PIN separately. The encryption key lives in the URL fragment (`#key=…`); the room PIN is verified locally and never sent to the relay.
 
 ## Build
 
@@ -60,6 +60,7 @@ See [`docs/operator.md`](docs/operator.md) for acceptable-use and metadata notes
 
 - `GET /health` → JSON status
 - `WS /bucket/{id}?token={session}` → join/create; token reclaim within 30s
+- Room PIN (`pv` in URL hash) gates the client locally; relay tokens are derived from key+PIN+seat
 - Close code `4001` → bucket full
 - Binary frames → opaque ciphertext (relayed)
 - Text frames from server → control (`peer_join` / `peer_leave` / `slot`)

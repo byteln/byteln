@@ -221,6 +221,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	if token == "" {
 		token = headerGet(headers, "X-Byteln-Token")
 	}
+	deviceSessionID := u.Query().Get("sid")
 	ip := clientIP(conn, headers)
 
 	exists := s.reg.Get(bucketID) != nil
@@ -258,7 +259,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		sendCh: make(chan outbound, 64),
 	}
 
-	jr := s.reg.Join(bucketID, token, ip, p)
+	jr := s.reg.Join(bucketID, token, deviceSessionID, ip, p)
 	if jr.Rejected {
 		if !exists {
 			s.limit.ReleaseBucket(ip)
@@ -275,12 +276,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	s.mu.Unlock()
 
 	s.sendControl(p, protocol.Control{Type: protocol.CtrlSlot, Slot: &p.slot})
-	if other := jr.Bucket.OtherConn(p.slot); other != nil {
-		if op, ok := other.(*Peer); ok {
-			s.sendControl(op, protocol.Control{Type: protocol.CtrlPeerJoin})
-			s.sendControl(p, protocol.Control{Type: protocol.CtrlPeerJoin})
-		}
-	}
+	s.notifyPeerPresence(jr.Bucket)
 
 	for _, f := range s.reg.DrainBuffer(jr.Bucket) {
 		op := ws.OpBinary
@@ -359,6 +355,20 @@ func (s *Server) readPeer(p *Peer) {
 		other := b.OtherConn(p.slot)
 		if opPeer, ok := other.(*Peer); ok {
 			opPeer.Enqueue(data, op)
+			s.sendControl(p, protocol.Control{Type: protocol.CtrlPeerJoin})
+		}
+	}
+}
+
+func (s *Server) notifyPeerPresence(b *bucket.Bucket) {
+	if b.ConnectedCount() < 2 {
+		return
+	}
+	for slot := 0; slot < 2; slot++ {
+		if conn := b.PeerConn(slot); conn != nil {
+			if rp, ok := conn.(*Peer); ok {
+				s.sendControl(rp, protocol.Control{Type: protocol.CtrlPeerJoin})
+			}
 		}
 	}
 }
