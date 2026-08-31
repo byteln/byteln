@@ -17,6 +17,7 @@
 	} from '$lib/crypto/room';
 	import { importKeyRaw, randomToken } from '$lib/crypto/session';
 	import {
+		browserOffline,
 		connectionManager,
 		messagesByBucket,
 		roomRuntimes
@@ -74,6 +75,9 @@
 	const runtime = $derived($roomRuntimes[bucketId]);
 	const connState = $derived(runtime?.connState ?? 'connecting');
 	const connDetail = $derived(runtime?.connDetail ?? '');
+	const reconnectAttempt = $derived(runtime?.reconnectAttempt ?? 0);
+	const reconnectStalled = $derived(runtime?.reconnectStalled ?? false);
+	const offline = $derived($browserOffline);
 	const peerPresent = $derived(runtime?.peerPresent ?? false);
 	const partnerConnected = $derived(
 		peerPresent || messages.some((m) => m.from === 'peer')
@@ -95,26 +99,38 @@
 
 	const presenceLabel = $derived.by(() => {
 		if (phase !== 'chat') return 'Enter room PIN';
-		if (connState === 'connecting' || connState === 'reconnecting') {
-			return connState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…';
+		if (offline) return 'Offline';
+		if (connState === 'connecting') return 'Connecting…';
+		if (connState === 'reconnecting') {
+			return reconnectAttempt > 1 ? `Reconnecting… (${reconnectAttempt})` : 'Reconnecting…';
 		}
-		if (connState === 'closed' || connState === 'error') {
-			return 'Disconnected — retrying';
-		}
+		if (reconnectStalled || connState === 'error') return 'Connection lost';
+		if (connState === 'closed') return 'Disconnected';
 		return partnerConnected ? `${partnerLabelText} connected` : `Waiting for ${partnerLabelText}`;
 	});
 
 	const presenceHint = $derived.by(() => {
 		if (phase === 'creator_share') return 'Share the link and PIN with your partner separately.';
 		if (phase === 'line_pin') return 'The PIN is not in the link — ask whoever invited you.';
+		if (offline) return 'Waiting for network — will retry when you are back online.';
 		if (connState === 'open' && partnerConnected) return `${partnerLabelText} is in this chat.`;
 		if (connState === 'open' && isCreator) return 'Share the link and room PIN with your partner.';
 		if (connState === 'open') return `Connected — waiting for ${partnerLabelText} to join.`;
-		if (connState === 'reconnecting' || connState === 'closed' || connState === 'error') {
-			return 'Trying to restore your connection automatically.';
-		}
+		if (connState === 'reconnecting') return 'Restoring your secure connection automatically.';
+		if (reconnectStalled) return 'Automatic retry stopped — tap Reconnect below.';
+		if (connState === 'connecting') return 'Opening a secure channel to the relay.';
+		if (connState === 'closed' || connState === 'error') return 'Trying to restore your connection.';
 		return 'Opening a secure channel to the relay.';
 	});
+
+	const showConnBanner = $derived(
+		phase === 'chat' &&
+			(offline ||
+				reconnectStalled ||
+				connState === 'reconnecting' ||
+				connState === 'closed' ||
+				connState === 'error')
+	);
 
 	function updateScrollPin() {
 		if (!listEl) return;
@@ -542,6 +558,45 @@
 
 		<ConversationTabs variant="compact" />
 
+		{#if showConnBanner}
+			<div
+				class="conn-banner"
+				class:offline
+				class:warn={connState === 'reconnecting' || connState === 'closed' || connState === 'error'}
+				class:lost={reconnectStalled}
+				role="status"
+			>
+				<span class="conn-banner-dot" aria-hidden="true"></span>
+				<div class="conn-banner-text">
+					{#if offline}
+						<strong>You appear offline</strong>
+						<span>Messages will send again when your network returns.</span>
+					{:else if reconnectStalled}
+						<strong>Connection lost</strong>
+						<span>Could not restore the secure line automatically.</span>
+					{:else if connState === 'reconnecting'}
+						<strong>
+							{reconnectAttempt > 1 ? `Reconnecting… (attempt ${reconnectAttempt})` : 'Reconnecting…'}
+						</strong>
+						<span>Restoring your secure connection.</span>
+					{:else}
+						<strong>Connection interrupted</strong>
+						<span>Trying to restore your secure connection.</span>
+					{/if}
+				</div>
+				{#if reconnectStalled}
+					<button
+						type="button"
+						class="conn-reconnect-btn"
+						disabled={reconnectBusy}
+						onclick={() => retryReconnect()}
+					>
+						{reconnectBusy ? 'Reconnecting…' : 'Reconnect now'}
+					</button>
+				{/if}
+			</div>
+		{/if}
+
 		{#if legacyMode}
 			<p class="legacy-banner" role="status">
 				Legacy link (no room PIN). Reconnect may show “secure line full” — create a new chat for
@@ -936,6 +991,105 @@
 		font-size: 0.8rem;
 		color: var(--muted);
 		line-height: 1.35;
+	}
+
+	.conn-banner {
+		flex-shrink: 0;
+		display: flex;
+		align-items: center;
+		gap: 0.65rem;
+		padding: 0.55rem 0.75rem;
+		border-radius: 0.35rem;
+		border: 1px solid rgba(61, 220, 176, 0.25);
+		background: rgba(61, 220, 176, 0.08);
+		color: var(--ink);
+	}
+
+	.conn-banner.warn {
+		border-color: rgba(255, 193, 77, 0.35);
+		background: rgba(255, 193, 77, 0.08);
+	}
+
+	.conn-banner.offline {
+		border-color: rgba(160, 170, 165, 0.35);
+		background: rgba(160, 170, 165, 0.1);
+	}
+
+	.conn-banner.lost {
+		border-color: rgba(255, 107, 107, 0.35);
+		background: rgba(255, 107, 107, 0.08);
+	}
+
+	.conn-banner-dot {
+		width: 0.55rem;
+		height: 0.55rem;
+		border-radius: 50%;
+		flex-shrink: 0;
+		background: var(--accent);
+		animation: conn-pulse 1.4s ease-in-out infinite;
+	}
+
+	.conn-banner.warn .conn-banner-dot {
+		background: #ffc14d;
+	}
+
+	.conn-banner.offline .conn-banner-dot {
+		background: var(--muted);
+		animation: none;
+	}
+
+	.conn-banner.lost .conn-banner-dot {
+		background: var(--danger);
+		animation: none;
+	}
+
+	.conn-banner-text {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+		font-size: 0.82rem;
+		line-height: 1.35;
+	}
+
+	.conn-banner-text strong {
+		font-size: 0.88rem;
+		font-weight: 600;
+	}
+
+	.conn-banner-text span {
+		color: var(--muted);
+	}
+
+	.conn-reconnect-btn {
+		flex-shrink: 0;
+		font: inherit;
+		font-size: 0.82rem;
+		font-weight: 600;
+		padding: 0.4rem 0.7rem;
+		border-radius: 0.3rem;
+		border: none;
+		background: var(--accent);
+		color: #06110d;
+		cursor: pointer;
+	}
+
+	.conn-reconnect-btn:disabled {
+		opacity: 0.65;
+		cursor: default;
+	}
+
+	@keyframes conn-pulse {
+		0%,
+		100% {
+			opacity: 1;
+			transform: scale(1);
+		}
+		50% {
+			opacity: 0.45;
+			transform: scale(0.85);
+		}
 	}
 
 	.actions {

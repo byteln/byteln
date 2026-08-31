@@ -365,9 +365,6 @@ func (r *Registry) SweepIdle() []string {
 			}
 		}
 		del := (connected == 0 && !reclaimHold) || (idle && connected == 0)
-		if !del && idle && connected > 0 {
-			del = idle
-		}
 		creator := b.CreatorIP
 		b.mu.Unlock()
 		if del {

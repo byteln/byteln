@@ -50,25 +50,26 @@
 		return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 	}
 
-	function connDot(bucketId: string): 'live' | 'wait' | 'off' {
+	function connDot(bucketId: string): 'live' | 'wait' | 'reconnecting' | 'off' {
 		const rt = $roomRuntimes[bucketId];
 		if (!rt) return 'off';
 		if (rt.connState === 'open' && rt.peerPresent) return 'live';
-		if (rt.connState === 'open' || rt.connState === 'connecting' || rt.connState === 'reconnecting')
-			return 'wait';
+		if (rt.connState === 'reconnecting') return 'reconnecting';
+		if (rt.connState === 'open' || rt.connState === 'connecting') return 'wait';
 		return 'off';
+	}
+
+	function connDotForRoom(room: RoomRecord): 'live' | 'wait' | 'reconnecting' | 'off' {
+		const dot = connDot(room.bucketId);
+		if (dot === 'live') return 'live';
+		if (dot === 'reconnecting') return 'reconnecting';
+		if (dot === 'wait' && roomHasPeerTraffic(room.bucketId)) return 'live';
+		return dot;
 	}
 
 	function roomHasPeerTraffic(bucketId: string): boolean {
 		const msgs = connectionManager.getMessages(bucketId);
 		return msgs.some((m) => m.from === 'peer');
-	}
-
-	function connDotForRoom(room: RoomRecord): 'live' | 'wait' | 'off' {
-		const dot = connDot(room.bucketId);
-		if (dot === 'live') return 'live';
-		if (dot === 'wait' && roomHasPeerTraffic(room.bucketId)) return 'live';
-		return dot;
 	}
 
 	async function openChat(room: RoomRecord) {
@@ -564,6 +565,24 @@
 	.dot.wait {
 		background: var(--accent);
 		opacity: 0.45;
+	}
+
+	.dot.reconnecting {
+		background: #ffc14d;
+		opacity: 1;
+		animation: dot-pulse 1.4s ease-in-out infinite;
+	}
+
+	@keyframes dot-pulse {
+		0%,
+		100% {
+			opacity: 1;
+			transform: scale(1);
+		}
+		50% {
+			opacity: 0.45;
+			transform: scale(0.85);
+		}
 	}
 
 	.modal-overlay {

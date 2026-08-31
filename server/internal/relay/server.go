@@ -334,8 +334,21 @@ func (s *Server) readPeer(p *Peer) {
 			return
 		}
 		if op == ws.OpPing {
+			if b := s.reg.Get(p.bucket); b != nil {
+				b.Touch()
+			}
 			p.Enqueue(data, ws.OpPong)
 			continue
+		}
+		if op == ws.OpText {
+			var ctrl protocol.Control
+			if json.Unmarshal(data, &ctrl) == nil && ctrl.Type == protocol.CtrlPing {
+				if b := s.reg.Get(p.bucket); b != nil {
+					b.Touch()
+				}
+				s.sendControl(p, protocol.Control{Type: protocol.CtrlPong})
+				continue
+			}
 		}
 		if op != ws.OpBinary && op != ws.OpText {
 			continue

@@ -61,6 +61,8 @@ export type RoomRuntime = {
 	peerPresent: boolean;
 	slot: number | null;
 	bucketFull: boolean;
+	reconnectAttempt: number;
+	reconnectStalled: boolean;
 };
 
 type InternalRoom = {
@@ -73,7 +75,13 @@ type InternalRoom = {
 	runtime: RoomRuntime;
 };
 
+export const browserOffline = writable(false);
+
 const MAX_OPEN_ROOMS = 10;
+const MAX_RECONNECT_ATTEMPTS = 10;
+const MAX_RECONNECT_DELAY_MS = 30_000;
+const HEARTBEAT_INTERVAL_MS = 35_000;
+const HEARTBEAT_TIMEOUT_MS = 70_000;
 
 export const activeBucketId = writable<string | null>(null);
 export const roomRuntimes = writable<Record<string, RoomRuntime>>({});
@@ -84,6 +92,214 @@ class ConnectionManagerImpl {
 	private creds = new Map<string, RoomCredentials>();
 	/** One connect flow per room — avoids duplicate WebSockets on refresh. */
 	private openPromises = new Map<string, Promise<boolean>>();
+	private reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private reconnectAttempts = new Map<string, number>();
+	private heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+	private heartbeatPending = new Map<string, ReturnType<typeof setTimeout>>();
+	private suppressReconnect = new Set<string>();
+	private appLocked = false;
+	private lifecycleInitialized = false;
+
+	constructor() {
+		this.initLifecycleHooks();
+	}
+
+	private defaultRuntime(): RoomRuntime {
+		return {
+			connState: 'connecting',
+			connDetail: '',
+			peerPresent: false,
+			slot: null,
+			bucketFull: false,
+			reconnectAttempt: 0,
+			reconnectStalled: false
+		};
+	}
+
+	private initLifecycleHooks() {
+		if (this.lifecycleInitialized || typeof window === 'undefined') return;
+		this.lifecycleInitialized = true;
+		browserOffline.set(!navigator.onLine);
+		document.addEventListener('visibilitychange', () => {
+			if (document.visibilityState === 'visible') {
+				this.ensureAllConnected();
+			}
+		});
+		window.addEventListener('online', () => {
+			browserOffline.set(false);
+			this.ensureAllConnected();
+		});
+		window.addEventListener('offline', () => {
+			browserOffline.set(true);
+			for (const room of this.rooms.values()) {
+				if (room.runtime.connState === 'open') {
+					room.runtime.connDetail = 'offline';
+				}
+			}
+			this.syncRuntimes();
+		});
+	}
+
+	private ensureAllConnected() {
+		if (this.appLocked) return;
+		for (const [bucketId, room] of this.rooms) {
+			if (room.runtime.bucketFull) continue;
+			if (
+				!room.client?.connected ||
+				room.runtime.connState === 'closed' ||
+				room.runtime.connState === 'error' ||
+				room.runtime.reconnectStalled
+			) {
+				this.resetReconnectState(bucketId);
+				void this.reconnectRoom(bucketId);
+			} else if (room.runtime.connState === 'open') {
+				this.sendHeartbeatPing(bucketId);
+			}
+		}
+	}
+
+	private resetReconnectState(bucketId: string) {
+		this.cancelManagedReconnect(bucketId);
+		this.reconnectAttempts.delete(bucketId);
+		const room = this.rooms.get(bucketId);
+		if (room) {
+			room.runtime.reconnectAttempt = 0;
+			room.runtime.reconnectStalled = false;
+			this.syncRuntimes();
+		}
+	}
+
+	private cancelManagedReconnect(bucketId: string) {
+		const timer = this.reconnectTimers.get(bucketId);
+		if (timer) {
+			clearTimeout(timer);
+			this.reconnectTimers.delete(bucketId);
+		}
+	}
+
+	private cancelAllManagedReconnects() {
+		for (const timer of this.reconnectTimers.values()) {
+			clearTimeout(timer);
+		}
+		this.reconnectTimers.clear();
+	}
+
+	private markReconnectStalled(bucketId: string) {
+		const room = this.rooms.get(bucketId);
+		if (!room) return;
+		room.runtime.connState = 'error';
+		room.runtime.connDetail = 'reconnect manually';
+		room.runtime.reconnectStalled = true;
+		this.syncRuntimes();
+	}
+
+	private scheduleManagedReconnect(bucketId: string) {
+		if (this.appLocked || this.suppressReconnect.has(bucketId)) return;
+		const room = this.rooms.get(bucketId);
+		if (!room || room.runtime.bucketFull || room.runtime.reconnectStalled) return;
+
+		this.cancelManagedReconnect(bucketId);
+
+		const attempt = this.reconnectAttempts.get(bucketId) ?? 0;
+		if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+			this.markReconnectStalled(bucketId);
+			return;
+		}
+
+		const delay = Math.min(1000 * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
+		room.runtime.connState = 'reconnecting';
+		room.runtime.reconnectAttempt = attempt + 1;
+		room.runtime.reconnectStalled = false;
+		room.runtime.connDetail = attempt > 0 ? `attempt ${attempt + 1}` : '';
+		this.syncRuntimes();
+
+		const timer = setTimeout(() => {
+			this.reconnectTimers.delete(bucketId);
+			if (!this.rooms.has(bucketId)) return;
+			this.reconnectAttempts.set(bucketId, attempt + 1);
+			void this.reconnectRoom(bucketId).then((ok) => {
+				const r = this.rooms.get(bucketId);
+				if (!r || ok || r.runtime.bucketFull) return;
+				this.scheduleManagedReconnect(bucketId);
+			});
+		}, delay);
+		this.reconnectTimers.set(bucketId, timer);
+	}
+
+	private stopHeartbeat(bucketId: string) {
+		const interval = this.heartbeatTimers.get(bucketId);
+		if (interval) {
+			clearInterval(interval);
+			this.heartbeatTimers.delete(bucketId);
+		}
+		const pending = this.heartbeatPending.get(bucketId);
+		if (pending) {
+			clearTimeout(pending);
+			this.heartbeatPending.delete(bucketId);
+		}
+	}
+
+	private stopAllHeartbeats() {
+		for (const bucketId of [...this.heartbeatTimers.keys()]) {
+			this.stopHeartbeat(bucketId);
+		}
+	}
+
+	private startHeartbeat(bucketId: string) {
+		this.stopHeartbeat(bucketId);
+		const tick = () => {
+			const room = this.rooms.get(bucketId);
+			if (!room?.client?.connected || room.runtime.connState !== 'open') return;
+			if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+			this.sendHeartbeatPing(bucketId);
+		};
+		const interval = setInterval(tick, HEARTBEAT_INTERVAL_MS);
+		this.heartbeatTimers.set(bucketId, interval);
+		setTimeout(tick, 5000);
+	}
+
+	private sendHeartbeatPing(bucketId: string) {
+		const room = this.rooms.get(bucketId);
+		if (!room?.client?.connected) return;
+
+		if (this.heartbeatPending.has(bucketId)) {
+			void this.forceStaleReconnect(bucketId);
+			return;
+		}
+
+		room.client.sendControl({ t: 'ping' });
+		const timeout = setTimeout(() => {
+			this.heartbeatPending.delete(bucketId);
+			void this.forceStaleReconnect(bucketId);
+		}, HEARTBEAT_TIMEOUT_MS);
+		this.heartbeatPending.set(bucketId, timeout);
+	}
+
+	private onHeartbeatPong(bucketId: string) {
+		const pending = this.heartbeatPending.get(bucketId);
+		if (pending) {
+			clearTimeout(pending);
+			this.heartbeatPending.delete(bucketId);
+		}
+	}
+
+	private async forceStaleReconnect(bucketId: string) {
+		const room = this.rooms.get(bucketId);
+		if (!room || room.runtime.bucketFull || this.suppressReconnect.has(bucketId)) return;
+		this.stopHeartbeat(bucketId);
+		await this.reconnectRoom(bucketId);
+		const r = this.rooms.get(bucketId);
+		if (r && !r.client?.connected && !r.runtime.bucketFull && !r.runtime.reconnectStalled) {
+			this.scheduleManagedReconnect(bucketId);
+		}
+	}
+
+	private handleDisconnectForReconnect(bucketId: string) {
+		if (this.suppressReconnect.has(bucketId) || this.appLocked) return;
+		const room = this.rooms.get(bucketId);
+		if (!room || room.runtime.bucketFull) return;
+		this.scheduleManagedReconnect(bucketId);
+	}
 
 	private syncRuntimes() {
 		const out: Record<string, RoomRuntime> = {};
@@ -194,6 +410,7 @@ class ConnectionManagerImpl {
 		const inflight = this.openPromises.get(bucketId);
 		if (inflight) return inflight;
 
+		this.resetReconnectState(bucketId);
 		const promise = this.doReconnectRoom(bucketId);
 		this.openPromises.set(bucketId, promise);
 		try {
@@ -204,20 +421,27 @@ class ConnectionManagerImpl {
 	}
 
 	private async doReconnectRoom(bucketId: string): Promise<boolean> {
-		const room = this.rooms.get(bucketId);
-		if (room) {
-			room.runtime.bucketFull = false;
-			if (room.client) {
-				await room.client.closeAndWait();
-				room.client = null;
+		this.suppressReconnect.add(bucketId);
+		this.stopHeartbeat(bucketId);
+		try {
+			const room = this.rooms.get(bucketId);
+			if (room) {
+				room.runtime.bucketFull = false;
+				room.runtime.reconnectStalled = false;
+				if (room.client) {
+					await room.client.closeAndWait();
+					room.client = null;
+				}
 			}
+			// Let the relay process Leave before we open a new socket.
+			await new Promise((r) => setTimeout(r, 350));
+			if (!this.rooms.has(bucketId)) {
+				return this.openRoom(bucketId);
+			}
+			return this.connectRoom(bucketId);
+		} finally {
+			this.suppressReconnect.delete(bucketId);
 		}
-		// Let the relay process Leave before we open a new socket.
-		await new Promise((r) => setTimeout(r, 350));
-		if (!this.rooms.has(bucketId)) {
-			return this.openRoom(bucketId);
-		}
-		return this.connectRoom(bucketId);
 	}
 
 	private async connectRoom(bucketId: string): Promise<boolean> {
@@ -225,23 +449,9 @@ class ConnectionManagerImpl {
 		if (!existing) return false;
 		if (existing.client?.connected) return true;
 
-		existing.runtime.bucketFull = false;
-		existing.runtime.connState = 'connecting';
-		this.syncRuntimes();
-		if (existing.client) {
-			await existing.client.closeAndWait();
-			existing.client = null;
-		}
-		const token = await this.relayTokenForRoom(bucketId, existing);
-		if (!token) return false;
-		return this.connectRelay(bucketId, token);
-	}
-
-	private async doOpenRoom(bucketId: string): Promise<boolean> {
-		const existing = this.rooms.get(bucketId);
-		if (existing?.client?.connected) return true;
-
-		if (existing) {
+		this.suppressReconnect.add(bucketId);
+		this.stopHeartbeat(bucketId);
+		try {
 			existing.runtime.bucketFull = false;
 			existing.runtime.connState = 'connecting';
 			this.syncRuntimes();
@@ -252,6 +462,31 @@ class ConnectionManagerImpl {
 			const token = await this.relayTokenForRoom(bucketId, existing);
 			if (!token) return false;
 			return this.connectRelay(bucketId, token);
+		} finally {
+			this.suppressReconnect.delete(bucketId);
+		}
+	}
+
+	private async doOpenRoom(bucketId: string): Promise<boolean> {
+		const existing = this.rooms.get(bucketId);
+		if (existing?.client?.connected) return true;
+
+		if (existing) {
+			this.suppressReconnect.add(bucketId);
+			try {
+				existing.runtime.bucketFull = false;
+				existing.runtime.connState = 'connecting';
+				this.syncRuntimes();
+				if (existing.client) {
+					await existing.client.closeAndWait();
+					existing.client = null;
+				}
+				const token = await this.relayTokenForRoom(bucketId, existing);
+				if (!token) return false;
+				return this.connectRelay(bucketId, token);
+			} finally {
+				this.suppressReconnect.delete(bucketId);
+			}
 		}
 
 		if (this.rooms.size >= MAX_OPEN_ROOMS) return false;
@@ -282,7 +517,9 @@ class ConnectionManagerImpl {
 			connDetail: '',
 			peerPresent: false,
 			slot: null,
-			bucketFull: false
+			bucketFull: false,
+			reconnectAttempt: 0,
+			reconnectStalled: false
 		};
 
 		const internal: InternalRoom = {
@@ -352,10 +589,21 @@ class ConnectionManagerImpl {
 		client.onStatus = ((s, detail) => {
 			const r = this.rooms.get(bucketId);
 			if (!r) return;
-			r.runtime.connState = s as ConnState;
-			r.runtime.connDetail = detail ?? '';
+			if (s === 'open') {
+				this.resetReconnectState(bucketId);
+				r.runtime.connState = 'open';
+				r.runtime.connDetail = '';
+				this.startHeartbeat(bucketId);
+			} else {
+				r.runtime.connState = s as ConnState;
+				r.runtime.connDetail = detail ?? '';
+				if (s === 'closed' || s === 'error') {
+					this.stopHeartbeat(bucketId);
+				}
+			}
 			if (s === 'closed' && detail === 'bucket full') {
 				r.runtime.bucketFull = true;
+				this.cancelManagedReconnect(bucketId);
 				client.close();
 				r.client = null;
 			}
@@ -363,12 +611,19 @@ class ConnectionManagerImpl {
 				const hasPeerMsgs = (get(messagesByBucket)[bucketId] ?? []).some((m) => m.from === 'peer');
 				if (!hasPeerMsgs) r.runtime.peerPresent = false;
 			}
+			if (s === 'closed' && detail !== 'bucket full') {
+				this.handleDisconnectForReconnect(bucketId);
+			}
 			this.syncRuntimes();
 		}) satisfies StatusHandler;
 
 		client.onControl = (msg) => {
 			const r = this.rooms.get(bucketId);
 			if (!r) return;
+			if (msg.t === 'pong') {
+				this.onHeartbeatPong(bucketId);
+				return;
+			}
 			if (msg.t === 'slot' && typeof msg.n === 'number') r.runtime.slot = msg.n;
 			if (msg.t === 'peer_join') {
 				r.runtime.peerPresent = true;
@@ -459,6 +714,8 @@ class ConnectionManagerImpl {
 	private closeRoomConnection(bucketId: string) {
 		const room = this.rooms.get(bucketId);
 		if (!room) return;
+		this.cancelManagedReconnect(bucketId);
+		this.stopHeartbeat(bucketId);
 		room.client?.close();
 		room.client = null;
 		this.rooms.delete(bucketId);
@@ -490,11 +747,16 @@ class ConnectionManagerImpl {
 	}
 
 	lock(): void {
+		this.appLocked = true;
+		this.cancelAllManagedReconnects();
+		this.stopAllHeartbeats();
 		void this.releaseAllConnections();
 	}
 
 	/** Graceful disconnect — releases relay seats before app lock (like refresh). */
 	async releaseAllConnections(): Promise<void> {
+		this.cancelAllManagedReconnects();
+		this.stopAllHeartbeats();
 		const ids = [...this.rooms.keys()];
 		await Promise.all(
 			ids.map(async (id) => {
@@ -516,6 +778,8 @@ class ConnectionManagerImpl {
 	}
 
 	clearAll(): void {
+		this.cancelAllManagedReconnects();
+		this.stopAllHeartbeats();
 		for (const id of [...this.rooms.keys()]) {
 			this.closeRoom(id);
 		}
@@ -527,6 +791,7 @@ class ConnectionManagerImpl {
 	}
 
 	async restoreAll(): Promise<void> {
+		this.appLocked = false;
 		const records = await listRooms();
 		for (const rec of records) {
 			if (rec.credentialsEnc && isVaultUnlocked()) {

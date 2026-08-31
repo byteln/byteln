@@ -209,3 +209,45 @@ func TestNoBufferWhenPeerPresent(t *testing.T) {
 		t.Fatal("should not buffer when peer connected")
 	}
 }
+
+func TestConnectedBucketNotSweptWhenIdle(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	reg := bucket.NewRegistry(testCfg(&now))
+	reg.Join("b1", "tokA", "sidA", "1.1.1.1", "c1")
+	reg.Join("b1", "tokB", "sidB", "2.2.2.2", "c2")
+
+	now = now.Add(11 * time.Minute)
+	_ = reg.SweepIdle()
+	if reg.Get("b1") == nil {
+		t.Fatal("connected bucket should not be swept while peers remain connected")
+	}
+}
+
+func TestIdleEmptyBucketSwept(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	reg := bucket.NewRegistry(testCfg(&now))
+	reg.Join("b1", "tokA", "sidA", "1.1.1.1", "c1")
+	reg.Leave("b1", 0)
+
+	now = now.Add(31 * time.Second)
+	_ = reg.SweepIdle()
+	if reg.Get("b1") != nil {
+		t.Fatal("empty bucket should be swept after reclaim window")
+	}
+}
+
+func TestTouchUpdatesLastSeen(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	reg := bucket.NewRegistry(testCfg(&now))
+	j := reg.Join("b1", "tokA", "sidA", "1.1.1.1", "c1")
+	b := j.Bucket
+
+	now = now.Add(9 * time.Minute)
+	b.Touch()
+
+	now = now.Add(2 * time.Minute)
+	_ = reg.SweepIdle()
+	if reg.Get("b1") == nil {
+		t.Fatal("Touch should refresh idle timer and keep bucket alive")
+	}
+}

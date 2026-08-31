@@ -94,6 +94,12 @@ export class RelayClient {
 		}
 	}
 
+	sendControl(msg: { t: string; n?: number }) {
+		if (this.ws?.readyState === WebSocket.OPEN) {
+			this.ws.send(JSON.stringify(msg));
+		}
+	}
+
 	get connected() {
 		return this.ws?.readyState === WebSocket.OPEN;
 	}

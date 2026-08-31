@@ -14,6 +14,8 @@ const (
 	CtrlPeerJoin  = "peer_join"
 	CtrlPeerLeave = "peer_leave"
 	CtrlSlot      = "slot"
+	CtrlPing      = "ping"
+	CtrlPong      = "pong"
 )
 
 // Control is a small JSON control message. Never contains chat content.
