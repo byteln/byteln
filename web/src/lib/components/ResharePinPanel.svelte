@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ShareQr from '$lib/components/ShareQr.svelte';
 	import { shareRoomHash } from '$lib/crypto/room';
 	import { connectionManager } from '$lib/relay/connection-manager';
 	import { getRoom, type RoomRecord } from '$lib/storage/history';
@@ -96,6 +97,7 @@
 		{#if roomPin}
 			<p class="hint">Reshare the link and PIN separately — never paste the PIN into the URL.</p>
 			<p class="pin-display" aria-label="Room PIN">{roomPin}</p>
+			<ShareQr value={shareUrl()} compact />
 			<div class="actions">
 				<button type="button" class="inline-btn" onclick={copyPin}>{copied ? 'Copied' : 'Copy PIN'}</button>
 				<button type="button" class="inline-btn primary" onclick={copyShareAndPin}>

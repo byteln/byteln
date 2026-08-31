@@ -20,6 +20,7 @@
 	let { variant }: Props = $props();
 
 	let rooms = $state<RoomRecord[]>([]);
+	let loaded = $state(false);
 	let editingRoom = $state<RoomRecord | null>(null);
 	let editPartnerName = $state('');
 	let menuPos = $state<{ bucketId: string; top: number; left: number } | null>(null);
@@ -31,6 +32,7 @@
 
 	async function loadRooms() {
 		rooms = await listRooms();
+		loaded = true;
 	}
 
 	onMount(() => {
@@ -139,7 +141,7 @@
 		await loadRooms();
 		bumpRooms();
 		if (leaveChat) {
-			await goto('/');
+			await goto('/app');
 		}
 	}
 
@@ -157,79 +159,94 @@
 
 <svelte:window onclick={onDocClick} />
 
-{#if rooms.length > 0}
-	{#if variant === 'home'}
-		<section class="home-list" aria-label="Your chats">
-			<h2>Your chats</h2>
-			<ul role="list">
+{#if variant === 'home'}
+	<section class="home-list" aria-label="Your chats">
+		<h2 class="list-label">Your chats</h2>
+		{#if loaded && rooms.length === 0}
+			<div class="empty-state">
+				<svg width="40" height="24" viewBox="0 0 40 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+					<line x1="8" y1="12" x2="32" y2="12" stroke="#232830" stroke-width="1.5" />
+					<circle cx="8" cy="12" r="5" fill="#090B0D" stroke="#34D399" stroke-width="2" />
+					<circle cx="32" cy="12" r="5" fill="#090B0D" stroke="#34D399" stroke-width="2" />
+				</svg>
+				<p>No lines yet. Start one below, or open a link someone sent you.</p>
+			</div>
+		{:else if rooms.length > 0}
+			<ul class="chat-list" role="list">
 				{#each rooms as room (room.bucketId)}
-					<li>
-						<button type="button" class="row" onclick={() => openChat(room)}>
-							<span class="dot {connDotForRoom(room)}" aria-hidden="true"></span>
-							<span class="main">
-								<span class="name">{room.nickname}</span>
-								<span class="subid" title={LINE_ID_LABEL}>{room.bucketId}</span>
-								{#if room.lastPreview}
-									<span class="preview">{room.lastPreview}</span>
-								{/if}
-							</span>
-							<span class="meta">
-								{#if room.unread && activeId !== room.bucketId}
-									<span class="badge" aria-label="Unread">●</span>
-								{/if}
-								<time datetime={new Date(room.lastActiveAt).toISOString()}>
-									{formatTime(room.lastActiveAt)}
-								</time>
+					<li class="chat-row">
+						<button type="button" class="chat-open" onclick={() => openChat(room)}>
+							<span class={['chat-status', connDotForRoom(room)]} aria-hidden="true"></span>
+							<span class="chat-main">
+								<span class="chat-top-row">
+									<span class="chat-name">{room.nickname}</span>
+									<time class="chat-time" datetime={new Date(room.lastActiveAt).toISOString()}>
+										{formatTime(room.lastActiveAt)}
+									</time>
+								</span>
+								<span class="chat-preview">
+									<span class="chat-id" title={LINE_ID_LABEL}>{room.bucketId}</span>
+									{#if room.lastPreview}
+										· {room.lastPreview}
+									{/if}
+									{#if room.unread && activeId !== room.bucketId}
+										<span class="unread" aria-label="Unread">●</span>
+									{/if}
+								</span>
 							</span>
 						</button>
 						<button
 							type="button"
-							class="menu-btn"
-							aria-label="Chat options"
+							class="chat-more"
+							aria-label="Line options"
 							aria-haspopup="menu"
 							aria-expanded={menuPos?.bucketId === room.bucketId}
 							onclick={(e) => openMenu(room.bucketId, e)}
 						>
-							⋯
+							<svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+								<circle cx="10" cy="4" r="1.5" fill="currentColor" />
+								<circle cx="10" cy="10" r="1.5" fill="currentColor" />
+								<circle cx="10" cy="16" r="1.5" fill="currentColor" />
+							</svg>
 						</button>
 					</li>
 				{/each}
 			</ul>
-		</section>
-	{:else}
-		<div class="tab-bar-wrap">
-			<div class="tab-bar" role="tablist" aria-label="Conversations">
-				{#each rooms as room (room.bucketId)}
-					<div class="tab-wrap" class:active={activeId === room.bucketId}>
-						<button
-							type="button"
-							role="tab"
-							class="tab"
-							aria-selected={activeId === room.bucketId}
-							onclick={() => openChat(room)}
-						>
-							<span class="dot {connDotForRoom(room)}" aria-hidden="true"></span>
-							<span class="tab-label">{room.nickname}</span>
-							{#if room.unread && activeId !== room.bucketId}
-								<span class="badge" aria-label="Unread"></span>
-							{/if}
-						</button>
-						<button
-							type="button"
-							class="tab-menu"
-							aria-label="Options for {room.nickname}"
-							aria-haspopup="menu"
-							aria-expanded={menuPos?.bucketId === room.bucketId}
-							onclick={(e) => openMenu(room.bucketId, e)}
-						>
-							⋯
-						</button>
-					</div>
-				{/each}
-				<button type="button" class="tab new-tab" onclick={() => goto('/')}>+ New</button>
-			</div>
+		{/if}
+	</section>
+{:else if rooms.length > 0}
+	<div class="tab-bar-wrap">
+		<div class="tab-bar" role="tablist" aria-label="Conversations">
+			{#each rooms as room (room.bucketId)}
+				<div class="tab-wrap" class:active={activeId === room.bucketId}>
+					<button
+						type="button"
+						role="tab"
+						class="tab"
+						aria-selected={activeId === room.bucketId}
+						onclick={() => openChat(room)}
+					>
+						<span class="dot {connDotForRoom(room)}" aria-hidden="true"></span>
+						<span class="tab-label">{room.nickname}</span>
+						{#if room.unread && activeId !== room.bucketId}
+							<span class="badge" aria-label="Unread"></span>
+						{/if}
+					</button>
+					<button
+						type="button"
+						class="tab-menu"
+						aria-label="Options for {room.nickname}"
+						aria-haspopup="menu"
+						aria-expanded={menuPos?.bucketId === room.bucketId}
+						onclick={(e) => openMenu(room.bucketId, e)}
+					>
+						⋯
+					</button>
+				</div>
+			{/each}
+			<button type="button" class="tab new-tab" onclick={() => goto('/app')}>+ New</button>
 		</div>
-	{/if}
+	</div>
 {/if}
 
 {#if menuPos && menuRoom}
@@ -318,98 +335,170 @@
 {/if}
 
 <style>
-	.home-list h2 {
-		font-family: var(--font-display);
-		font-size: 1rem;
-		font-weight: 700;
-		margin: 0 0 0.65rem;
-		color: var(--muted);
+	.list-label {
+		font-family: inherit;
+		font-size: 12.5px;
+		color: var(--dim, var(--muted));
+		font-weight: 500;
+		margin: 0 0 10px;
+		padding: 0 2px;
 		text-transform: uppercase;
-		letter-spacing: 0.06em;
+		letter-spacing: 0.04em;
 	}
 
-	.home-list ul {
+	.chat-list {
 		list-style: none;
-		margin: 0;
+		margin: 0 0 28px;
 		padding: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 0.35rem;
+		gap: 8px;
 	}
 
-	.home-list li {
-		display: flex;
-		align-items: stretch;
-		gap: 0.25rem;
-	}
-
-	.row {
-		flex: 1;
+	.chat-row {
 		display: flex;
 		align-items: center;
-		gap: 0.65rem;
-		text-align: left;
-		padding: 0.7rem 0.85rem;
-		border-radius: 0.35rem;
+		gap: 4px;
+		background: var(--surface, rgba(18, 26, 23, 0.55));
 		border: 1px solid var(--line);
-		background: rgba(18, 26, 23, 0.55);
-		color: var(--ink);
+		border-radius: 12px;
+		padding: 4px 4px 4px 14px;
+	}
+
+	.chat-row:active {
+		background: var(--surface-2, #171b21);
+	}
+
+	.chat-open {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		text-align: left;
+		padding: 10px 0;
+		border: none;
+		background: none;
+		color: inherit;
 		font: inherit;
 		cursor: pointer;
 	}
 
-	.row:hover {
-		border-color: var(--accent-dim);
+	.chat-status {
+		width: 9px;
+		height: 9px;
+		border-radius: 50%;
+		background: var(--dim, var(--muted));
+		flex-shrink: 0;
 	}
 
-	.main {
+	.chat-status.live {
+		background: var(--accent);
+		box-shadow: 0 0 0 3px var(--accent-soft, var(--accent-dim));
+	}
+
+	.chat-status.wait {
+		background: var(--accent);
+		opacity: 0.45;
+	}
+
+	.chat-status.reconnecting {
+		background: #ffc14d;
+		animation: dot-pulse 1.4s ease-in-out infinite;
+	}
+
+	.chat-status.off {
+		background: var(--dim, var(--muted));
+	}
+
+	.chat-main {
 		flex: 1;
 		min-width: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 0.15rem;
+		gap: 3px;
 	}
 
-	.name {
-		font-weight: 600;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.subid {
-		font-family: ui-monospace, monospace;
-		font-size: 0.72rem;
-		color: var(--muted);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.preview {
-		font-size: 0.85rem;
-		color: var(--muted);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.meta {
+	.chat-top-row {
 		display: flex;
-		flex-direction: column;
-		align-items: flex-end;
-		gap: 0.25rem;
-		font-size: 0.75rem;
-		color: var(--muted);
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 8px;
+	}
+
+	.chat-name {
+		font-size: 15.5px;
+		font-weight: 600;
+		color: var(--text, var(--ink));
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.chat-time {
+		font-family: 'IBM Plex Mono', ui-monospace, monospace;
+		font-size: 11.5px;
+		color: var(--dim, var(--muted));
 		flex-shrink: 0;
 	}
 
-	.badge {
-		color: var(--accent);
-		font-size: 0.65rem;
+	.chat-preview {
+		font-size: 13.5px;
+		color: var(--muted);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
-	.menu-btn,
+	.chat-id {
+		font-family: 'IBM Plex Mono', ui-monospace, monospace;
+		color: var(--dim, var(--muted));
+	}
+
+	.unread {
+		color: var(--accent);
+		font-size: 0.7rem;
+		margin-left: 0.2rem;
+	}
+
+	.chat-more {
+		flex-shrink: 0;
+		width: 40px;
+		height: 40px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: var(--dim, var(--muted));
+		border: none;
+		background: none;
+		border-radius: 8px;
+		cursor: pointer;
+		padding: 0;
+	}
+
+	.chat-more:active {
+		background: var(--surface-2, #171b21);
+	}
+
+	.empty-state {
+		text-align: center;
+		padding: 40px 20px;
+		border: 1px dashed var(--line);
+		border-radius: 14px;
+		margin-bottom: 28px;
+	}
+
+	.empty-state svg {
+		margin-bottom: 14px;
+	}
+
+	.empty-state p {
+		font-size: 14px;
+		color: var(--muted);
+		margin: 0;
+		line-height: 1.6;
+	}
+
 	.tab-menu {
 		font: inherit;
 		cursor: pointer;

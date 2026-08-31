@@ -90,7 +90,7 @@
 </script>
 
 <main class="import">
-	<a href="/" class="brand">{APP_NAME}</a>
+	<a href="/app" class="brand">{APP_NAME}</a>
 	<h1>Import history</h1>
 	<p class="lede">Decrypt a portable export into this device’s local store.</p>
 	<p class="note">To reconnect live, use the full share link (includes <code>#key=</code> and room PIN fields).</p>

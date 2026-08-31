@@ -34,7 +34,7 @@
 		busy = true;
 		try {
 			await lockApp();
-			await goto('/');
+			await goto('/app');
 		} finally {
 			busy = false;
 		}
@@ -46,7 +46,7 @@
 			await clearAllLocal();
 			confirmClear = false;
 			bumpRooms();
-			await goto('/');
+			await goto('/app');
 		} finally {
 			busy = false;
 		}
@@ -99,8 +99,8 @@
 
 <style>
 	.device {
-		margin-top: 1.5rem;
-		padding-top: 1.25rem;
+		margin-top: 28px;
+		padding-top: 22px;
 		border-top: 1px solid var(--line);
 		display: flex;
 		flex-direction: column;
@@ -114,9 +114,12 @@
 	}
 
 	.device h2 {
-		font-family: var(--font-display);
-		font-size: 1rem;
+		font-size: 12.5px;
+		font-weight: 500;
 		margin: 0;
+		color: var(--dim, var(--muted));
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
 	}
 
 	.lede {
@@ -128,21 +131,33 @@
 
 	.actions {
 		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
+		flex-direction: column;
+		gap: 8px;
 	}
 
-	button {
+	.device.compact .actions {
+		flex-direction: row;
+		flex-wrap: wrap;
+	}
+
+	.device .actions button {
 		font: inherit;
 		cursor: pointer;
-		border-radius: 0.35rem;
-		padding: 0.55rem 0.85rem;
+		border-radius: 12px;
+		padding: 14px;
+		min-height: 48px;
 		border: 1px solid var(--line);
 		background: transparent;
 		color: var(--ink);
 	}
 
-	button:disabled {
+	.device.compact .actions button {
+		border-radius: 0.35rem;
+		padding: 0.55rem 0.85rem;
+		min-height: 0;
+	}
+
+	.device .actions button:disabled {
 		opacity: 0.6;
 		cursor: wait;
 	}
@@ -201,6 +216,16 @@
 		justify-content: flex-end;
 		gap: 0.5rem;
 		margin-top: 0.25rem;
+	}
+
+	.modal-actions button {
+		font: inherit;
+		cursor: pointer;
+		border-radius: 0.35rem;
+		padding: 0.5rem 0.85rem;
+		border: 1px solid var(--line);
+		background: transparent;
+		color: var(--ink);
 	}
 
 	.danger-btn {

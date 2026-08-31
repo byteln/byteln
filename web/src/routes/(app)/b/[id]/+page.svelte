@@ -3,6 +3,7 @@
 	import { env } from '$env/dynamic/public';
 	import ConversationTabs from '$lib/components/ConversationTabs.svelte';
 	import DeviceSettings from '$lib/components/DeviceSettings.svelte';
+	import ShareQr from '$lib/components/ShareQr.svelte';
 	import {
 		exportHistory,
 		exportHistoryWithPassphraseOnly,
@@ -452,7 +453,7 @@
 <main class="chat">
 	{#if bucketFull}
 		<section class="blocked" role="alert">
-			<a href="/" class="back">{APP_NAME}</a>
+			<a href="/app" class="back">{APP_NAME}</a>
 			<div class="warn-mark" aria-hidden="true">!</div>
 			<h1>Secure line full</h1>
 			<p>
@@ -464,22 +465,23 @@
 				<button type="button" class="primary" disabled={reconnectBusy} onclick={() => retryReconnect()}>
 					{reconnectBusy ? 'Reconnecting…' : 'Try reconnect'}
 				</button>
-				<a class="home-btn" href="/">Back home</a>
+				<a class="home-btn" href="/app">Back home</a>
 			</div>
 		</section>
 	{:else if error && phase === 'loading'}
 		<section class="pin-screen" role="alert">
-			<a href="/" class="back">{APP_NAME}</a>
+			<a href="/app" class="back">{APP_NAME}</a>
 			<h1>Cannot open chat</h1>
 			<p class="pin-lede">{error}</p>
-			<a class="primary home-link" href="/">Back home</a>
+			<a class="primary home-link" href="/app">Back home</a>
 		</section>
 	{:else if phase === 'creator_share'}
 		<section class="pin-screen" aria-labelledby="creator-pin-title">
-			<a href="/" class="back">{APP_NAME}</a>
+			<a href="/app" class="back">{APP_NAME}</a>
 			<h1 id="creator-pin-title">Your room PIN</h1>
 			<p class="pin-lede">Share the <strong>link</strong> and this <strong>PIN</strong> separately.</p>
 			<p class="pin-display" aria-label="Room PIN">{creatorPin}</p>
+			<ShareQr value={shareUrl()} />
 			<p class="pin-note">Anyone with both can join. The relay never sees your PIN or messages.</p>
 			<div class="pin-actions">
 				<div class="copy-row">
@@ -498,7 +500,7 @@
 		</section>
 	{:else if phase === 'line_pin'}
 		<section class="pin-screen" aria-labelledby="pin-title">
-			<a href="/" class="back">{APP_NAME}</a>
+			<a href="/app" class="back">{APP_NAME}</a>
 			<h1 id="pin-title">Enter room PIN</h1>
 			<p class="pin-lede">Ask your partner for the 6-digit PIN that goes with this link.</p>
 			<form
@@ -528,7 +530,7 @@
 		</section>
 	{:else}
 		<header>
-			<a href="/" class="back">{APP_NAME}</a>
+			<a href="/app" class="back">{APP_NAME}</a>
 			<div class="presence" class:live={connState === 'open' && partnerConnected}>
 				<span class="presence-title">{presenceLabel}</span>
 				<span class="presence-hint">{presenceHint}</span>
@@ -738,9 +740,10 @@
 		flex-direction: column;
 		gap: 1rem;
 		padding: 0.5rem 0 2rem;
-		max-width: 22rem;
+		max-width: 24rem;
 		margin: 0 auto;
 		width: 100%;
+		overflow-y: auto;
 	}
 
 	.pin-screen h1 {

@@ -71,7 +71,7 @@
 		await clearAllLocalData();
 		bumpRooms();
 		mode = 'intro';
-		await goto('/');
+		await goto('/app');
 	}
 
 	async function doUnlock() {
