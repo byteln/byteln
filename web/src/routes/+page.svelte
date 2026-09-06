@@ -86,7 +86,7 @@
 			</p>
 
 			<div class="hero-actions">
-				<a href="/app" class="btn-primary">Start a secure line</a>
+				<a href="/app?create=1" class="btn-primary">Start a secure line</a>
 				<a href="#how" class="btn-secondary">See how it works</a>
 			</div>
 

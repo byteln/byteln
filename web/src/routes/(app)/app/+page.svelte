@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { env } from '$env/dynamic/public';
 	import ConversationTabs from '$lib/components/ConversationTabs.svelte';
 	import DeviceSettings from '$lib/components/DeviceSettings.svelte';
@@ -44,6 +45,16 @@
 		relay = await resolveRelayUrl(fallback);
 		servers = await loadDirectory(env.PUBLIC_DIRECTORY_URL || '/directory/servers.json');
 		await pingAll();
+
+		const createIntent =
+			page.url.searchParams.get('create') === '1' || page.url.searchParams.get('new') === '1';
+		if (createIntent) {
+			const url = new URL(page.url);
+			url.searchParams.delete('create');
+			url.searchParams.delete('new');
+			history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`);
+			await startChat();
+		}
 	});
 
 	async function pingAll() {
