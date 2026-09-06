@@ -26,7 +26,6 @@
 	let editPartnerName = $state('');
 	let menuPos = $state<{ bucketId: string; top: number; left: number } | null>(null);
 	let forgetRoom = $state<RoomRecord | null>(null);
-	let forgetWipe = $state(false);
 	let shareRoom = $state<RoomRecord | null>(null);
 
 	const activeId = $derived($activeBucketId);
@@ -117,7 +116,6 @@
 
 	function askForget(room: RoomRecord) {
 		forgetRoom = room;
-		forgetWipe = false;
 		closeMenu();
 	}
 
@@ -134,9 +132,8 @@
 		if (!forgetRoom) return;
 		const bucketId = forgetRoom.bucketId;
 		const leaveChat = page.url.pathname === `/b/${bucketId}`;
-		await connectionManager.forgetRoom(bucketId, forgetWipe);
+		await connectionManager.forgetRoom(bucketId);
 		forgetRoom = null;
-		forgetWipe = false;
 		await loadRooms();
 		bumpRooms();
 		if (leaveChat) {
@@ -146,7 +143,6 @@
 
 	function cancelForget() {
 		forgetRoom = null;
-		forgetWipe = false;
 	}
 
 	function onDocClick() {
@@ -295,11 +291,10 @@
 			onkeydown={(e) => e.key === 'Escape' && cancelForget()}
 		>
 			<h3 id="forget-title">Forget “{forgetRoom.nickname}”?</h3>
-			<p class="modal-hint">Removes this chat from your list on this device. The relay is not notified.</p>
-			<label class="check">
-				<input type="checkbox" bind:checked={forgetWipe} />
-				Also delete local messages for this chat
-			</label>
+			<p class="modal-hint">
+				Removes this chat and its local messages from this device. The relay is not notified — your
+				partner can still have their copy.
+			</p>
 			<div class="modal-actions">
 				<button type="button" onclick={cancelForget}>Cancel</button>
 				<button type="button" class="danger-btn" onclick={() => confirmForget()}>Forget chat</button>
@@ -600,15 +595,6 @@
 		border: 1px solid var(--line);
 		background: rgba(18, 26, 23, 0.8);
 		color: var(--ink);
-	}
-
-	.check {
-		display: flex;
-		align-items: flex-start;
-		gap: 0.5rem;
-		font-size: 0.9rem;
-		color: var(--muted);
-		cursor: pointer;
 	}
 
 	.modal-actions {

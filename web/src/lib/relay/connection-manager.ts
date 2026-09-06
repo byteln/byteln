@@ -732,14 +732,12 @@ class ConnectionManagerImpl {
 		});
 	}
 
-	async forgetRoom(bucketId: string, deleteMessages = false): Promise<void> {
+	async forgetRoom(bucketId: string): Promise<void> {
 		this.closeRoom(bucketId);
 		clearSessionCredentialsFor(bucketId);
 		clearRoomSessionStorage(bucketId);
 		await removeRoom(bucketId);
-		if (deleteMessages) {
-			await deleteMessagesForBucket(bucketId);
-		}
+		await deleteMessagesForBucket(bucketId);
 		if (get(activeBucketId) === bucketId) {
 			activeBucketId.set(null);
 		}
