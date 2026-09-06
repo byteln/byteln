@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { env } from '$env/dynamic/public';
-	import ConversationTabs from '$lib/components/ConversationTabs.svelte';
+	import ChatListSheet from '$lib/components/ChatListSheet.svelte';
+	import ChatListSidePanel from '$lib/components/ChatListSidePanel.svelte';
 	import DeviceSettings from '$lib/components/DeviceSettings.svelte';
 	import ShareQr from '$lib/components/ShareQr.svelte';
 	import {
@@ -34,16 +35,20 @@
 		getRoom,
 		getSessionToken,
 		listMessages,
+		listRooms,
 		resolveRelayUrl,
 		setNickname,
-		setSessionToken
+		setSessionToken,
+		type RoomRecord
 	} from '$lib/storage/history';
 	import { APP_NAME, LINE_ID_LABEL, partnerDisplayName, SECURE_LINE } from '$lib/brand';
+	import { inviteText, shareInvite } from '$lib/share';
 	import { bumpRooms, roomsRevision } from '$lib/stores/conversations';
 	import { onMount, tick } from 'svelte';
 
 	const bucketId = $derived(page.params.id ?? '');
 	const SCROLL_THRESHOLD = 72;
+	const CHATS_SHEET_MAX_WIDTH = 720;
 
 	type Phase = 'loading' | 'creator_share' | 'line_pin' | 'chat';
 
@@ -59,6 +64,8 @@
 	let error = $state('');
 	let relayUrl = $state('');
 	let copiedKind = $state<'link' | 'pin' | 'both' | null>(null);
+	let shareBusy = $state<'qr' | 'invite' | null>(null);
+	let shareFlash = $state<'qr' | 'invite' | null>(null);
 	let exportPass = $state('');
 	let passOnly = $state(false);
 	let reportNote = $state('');
@@ -69,6 +76,8 @@
 	let reconnectBusy = $state(false);
 	let legacyMode = $state(false);
 	let isCreator = $state(false);
+	let chatsOpen = $state(false);
+	let rooms = $state<RoomRecord[]>([]);
 
 	let listEl = $state<HTMLElement | null>(null);
 
@@ -87,6 +96,9 @@
 	const partnerLabelText = $derived(partnerDisplayName(nickname, bucketId));
 
 	const showScrollDown = $derived(!pinnedToBottom && messages.length > 0);
+	const hasOtherUnread = $derived(
+		rooms.some((r) => r.unread && r.bucketId !== bucketId)
+	);
 
 	$effect(() => {
 		if (phase !== 'chat') return;
@@ -144,6 +156,17 @@
 		if (!force && !pinnedToBottom) return;
 		listEl.scrollTo({ top: listEl.scrollHeight, behavior: force ? 'smooth' : 'auto' });
 		pinnedToBottom = true;
+	}
+
+	function openChatsSheet() {
+		if (typeof window !== 'undefined' && window.innerWidth >= CHATS_SHEET_MAX_WIDTH) return;
+		chatsOpen = true;
+	}
+
+	function onWindowResize() {
+		if (chatsOpen && window.innerWidth >= CHATS_SHEET_MAX_WIDTH) {
+			chatsOpen = false;
+		}
 	}
 
 	async function loadRoomMeta() {
@@ -227,100 +250,146 @@
 		bumpRooms();
 	}
 
-	onMount(() => {
-		notifyPerm = getNotifyPermission();
-		const unsubNames = roomsRevision.subscribe(() => {
-			void loadNames();
-		});
+	let bootGen = 0;
 
-		void (async () => {
-			if (!bucketId) return;
-			try {
-				await connectionManager.setActive(bucketId);
-				await loadNames();
+	function resetRoomUi() {
+		phase = 'loading';
+		key = null;
+		room = null;
+		creatorPin = '';
+		pinInput = '';
+		pinError = '';
+		error = '';
+		draft = '';
+		legacyMode = false;
+		isCreator = false;
+		showNicknamePrompt = false;
+		infoOpen = false;
+		copiedKind = null;
+		shareBusy = null;
+		shareFlash = null;
+		pinnedToBottom = true;
+		nickname = '';
+		editNickname = '';
+	}
 
-				let hash = location.hash;
-				if (!hash.includes('key=')) {
-					const rec = await getRoom(bucketId);
-					const creds = await connectionManager.getRoomCredentials(bucketId);
-					hash = creds?.roomHash || rec?.roomHash || '';
-					if (hash && !hash.startsWith('#')) hash = `#${hash}`;
-					if (hash.includes('key=')) {
-						history.replaceState(null, '', `${location.pathname}${hash}`);
-					}
-				}
+	async function bootstrapRoom(id: string, gen: number) {
+		try {
+			await connectionManager.setActive(id);
+			if (gen !== bootGen) return;
+			await loadNames();
+			if (gen !== bootGen) return;
 
-				const { hash: cleanHash, pinHint } = sanitizeRoomFragmentInput(hash);
-				if (cleanHash.includes('key=')) {
-					hash = cleanHash;
+			let hash = location.hash;
+			if (!hash.includes('key=')) {
+				const rec = await getRoom(id);
+				const creds = await connectionManager.getRoomCredentials(id);
+				if (gen !== bootGen) return;
+				hash = creds?.roomHash || rec?.roomHash || '';
+				if (hash && !hash.startsWith('#')) hash = `#${hash}`;
+				if (hash.includes('key=')) {
 					history.replaceState(null, '', `${location.pathname}${hash}`);
 				}
-				if (pinHint) pinInput = pinHint;
-
-				const parsed = parseRoomFragment(hash);
-				if (!parsed) {
-					error = 'Missing #key= in the URL. Ask the creator for the full share link.';
-					return;
-				}
-				room = parsed;
-				key = await importKeyRaw(parsed.keyRaw);
-				history.replaceState(null, '', `${location.pathname}${hash}`);
-
-				const fallback = defaultRelayUrl(env.PUBLIC_DEFAULT_RELAY);
-				relayUrl = await resolveRelayUrl(fallback);
-
-				if (!connectionManager.isOpen(bucketId)) {
-					const msgs = await listMessages(bucketId);
-					messagesByBucket.update((m) => ({ ...m, [bucketId]: msgs }));
-				}
-
-				if (parsed.legacy) {
-					legacyMode = true;
-					await connectLegacy();
-					await ensureRoomRegistered(parsed);
-					return;
-				}
-
-				const once = takeCreatorPin(bucketId);
-				if (once) {
-					creatorPin = once;
-					isCreator = true;
-					phase = 'creator_share';
-					await ensureRoomRegistered(parsed);
-					return;
-				}
-
-				const rt = connectionManager.getRuntime(bucketId);
-				if (rt?.bucketFull) {
-					phase = 'chat';
-					await loadRoomMeta();
-					return;
-				}
-
-				const opened = await connectionManager.openRoom(bucketId);
-				if (opened) {
-					await ensureRoomRegistered(parsed);
-					await loadRoomMeta();
-					await enterChatPhase(false);
-					return;
-				}
-
-				if (connectionManager.getRuntime(bucketId)?.bucketFull) {
-					phase = 'chat';
-					return;
-				}
-
-				await ensureRoomRegistered(parsed);
-				if (pinHint && /^\d{6}$/.test(pinHint)) {
-					await connectWithPin(pinHint);
-					return;
-				}
-				phase = 'line_pin';
-			} catch (e) {
-				error = e instanceof Error ? e.message : 'failed to start';
 			}
-		})();
 
+			const { hash: cleanHash, pinHint } = sanitizeRoomFragmentInput(hash);
+			if (cleanHash.includes('key=')) {
+				hash = cleanHash;
+				history.replaceState(null, '', `${location.pathname}${hash}`);
+			}
+			if (pinHint) pinInput = pinHint;
+
+			const parsed = parseRoomFragment(hash);
+			if (!parsed) {
+				error = 'Missing #key= in the URL. Ask the creator for the full share link.';
+				return;
+			}
+			room = parsed;
+			key = await importKeyRaw(parsed.keyRaw);
+			if (gen !== bootGen) return;
+			history.replaceState(null, '', `${location.pathname}${hash}`);
+
+			const fallback = defaultRelayUrl(env.PUBLIC_DEFAULT_RELAY);
+			relayUrl = await resolveRelayUrl(fallback);
+			if (gen !== bootGen) return;
+
+			if (!connectionManager.isOpen(id)) {
+				const msgs = await listMessages(id);
+				if (gen !== bootGen) return;
+				messagesByBucket.update((m) => ({ ...m, [id]: msgs }));
+			}
+
+			if (parsed.legacy) {
+				legacyMode = true;
+				await connectLegacy();
+				if (gen !== bootGen) return;
+				await ensureRoomRegistered(parsed);
+				return;
+			}
+
+			const once = takeCreatorPin(id);
+			if (once) {
+				creatorPin = once;
+				isCreator = true;
+				phase = 'creator_share';
+				await ensureRoomRegistered(parsed);
+				return;
+			}
+
+			const rt = connectionManager.getRuntime(id);
+			if (rt?.bucketFull) {
+				phase = 'chat';
+				await loadRoomMeta();
+				return;
+			}
+
+			const opened = await connectionManager.openRoom(id);
+			if (gen !== bootGen) return;
+			if (opened) {
+				await ensureRoomRegistered(parsed);
+				if (gen !== bootGen) return;
+				await loadRoomMeta();
+				await enterChatPhase(false);
+				return;
+			}
+
+			if (connectionManager.getRuntime(id)?.bucketFull) {
+				phase = 'chat';
+				return;
+			}
+
+			await ensureRoomRegistered(parsed);
+			if (gen !== bootGen) return;
+			if (pinHint && /^\d{6}$/.test(pinHint)) {
+				await connectWithPin(pinHint);
+				return;
+			}
+			phase = 'line_pin';
+		} catch (e) {
+			if (gen !== bootGen) return;
+			error = e instanceof Error ? e.message : 'failed to start';
+		}
+	}
+
+	$effect(() => {
+		const id = bucketId;
+		if (!id) return;
+		const gen = ++bootGen;
+		resetRoomUi();
+		void bootstrapRoom(id, gen);
+	});
+
+	async function loadRoomsForBadge() {
+		rooms = await listRooms();
+	}
+
+	onMount(() => {
+		notifyPerm = getNotifyPermission();
+		void loadRoomsForBadge();
+		const unsubNames = roomsRevision.subscribe(() => {
+			void loadNames();
+			void loadRoomsForBadge();
+		});
 		return unsubNames;
 	});
 
@@ -378,9 +447,46 @@
 			await copyCreatorLink();
 			return;
 		}
-		const text = `Open this link in your browser:\n${shareUrl()}\n\nRoom PIN (enter separately — do not paste into the URL):\n${creatorPin}`;
-		await navigator.clipboard.writeText(text);
+		await navigator.clipboard.writeText(inviteText(shareUrl(), creatorPin));
 		flashCopied('both');
+	}
+
+	function flashShare(kind: 'qr' | 'invite') {
+		shareFlash = kind;
+		setTimeout(() => {
+			if (shareFlash === kind) shareFlash = null;
+		}, 1500);
+	}
+
+	async function shareCreatorQr() {
+		if (shareBusy) return;
+		shareBusy = 'qr';
+		try {
+			const result = await shareInvite({
+				url: shareUrl(),
+				pin: creatorPin || undefined,
+				withQr: true,
+				qrFilename: `byteln-${bucketId}-qr.png`
+			});
+			if (result !== 'cancelled') flashShare('qr');
+		} finally {
+			shareBusy = null;
+		}
+	}
+
+	async function shareCreatorInvite() {
+		if (!creatorPin || shareBusy) return;
+		shareBusy = 'invite';
+		try {
+			const result = await shareInvite({
+				url: shareUrl(),
+				pin: creatorPin,
+				withQr: false
+			});
+			if (result !== 'cancelled') flashShare('invite');
+		} finally {
+			shareBusy = null;
+		}
 	}
 
 	async function doExport() {
@@ -450,6 +556,8 @@
 	}
 </script>
 
+<svelte:window onresize={onWindowResize} />
+
 <main class="chat">
 	{#if bucketFull}
 		<section class="blocked" role="alert">
@@ -485,13 +593,30 @@
 			<p class="pin-note">Anyone with both can join. The relay never sees your PIN or messages.</p>
 			<div class="pin-actions">
 				<div class="copy-row">
+					<button type="button" class="copy-btn" disabled={shareBusy !== null} onclick={() => void shareCreatorQr()}>
+						{shareFlash === 'qr' ? 'Shared' : shareBusy === 'qr' ? 'Sharing…' : 'Share QR'}
+					</button>
+					<button
+						type="button"
+						class="copy-btn primary"
+						disabled={!creatorPin || shareBusy !== null}
+						onclick={() => void shareCreatorInvite()}
+					>
+						{shareFlash === 'invite'
+							? 'Shared'
+							: shareBusy === 'invite'
+								? 'Sharing…'
+								: 'Share link + PIN'}
+					</button>
+				</div>
+				<div class="copy-row">
 					<button type="button" class="copy-btn" onclick={copyCreatorLink}>
 						{copiedKind === 'link' ? 'Copied' : 'Copy link'}
 					</button>
 					<button type="button" class="copy-btn" onclick={copyCreatorPinOnly}>
 						{copiedKind === 'pin' ? 'Copied' : 'Copy PIN'}
 					</button>
-					<button type="button" class="copy-btn primary" onclick={copyCreatorShare}>
+					<button type="button" class="copy-btn" onclick={copyCreatorShare}>
 						{copiedKind === 'both' ? 'Copied' : 'Copy link + PIN'}
 					</button>
 				</div>
@@ -529,170 +654,193 @@
 			<p class="pin-note">Wrong PIN? You will not connect.</p>
 		</section>
 	{:else}
-		<header>
-			<a href="/app" class="back">{APP_NAME}</a>
-			<div class="presence" class:live={connState === 'open' && partnerConnected}>
-				<span class="presence-title">{presenceLabel}</span>
-				<span class="presence-hint">{presenceHint}</span>
-			</div>
-			<div class="actions">
-				<button
-					type="button"
-					class="icon-btn"
-					aria-expanded={infoOpen}
-					aria-label="Chat details"
-					title="Chat details"
-					onclick={() => (infoOpen = !infoOpen)}
-				>
-					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-						<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.75" />
-						<path d="M12 10v6M12 7h.01" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" />
-					</svg>
-				</button>
-				<button type="button" onclick={doExport}>Export</button>
-				{#if notifyPerm === 'default'}
-					<button type="button" onclick={enableNotifications}>Enable alerts</button>
-				{:else if notifyPerm === 'granted'}
-					<span class="stat">alerts on</span>
+		<div class="chat-shell">
+			<aside class="chat-sidebar" aria-label="Your chats">
+				<ChatListSidePanel />
+			</aside>
+			<div class="chat-main">
+				<header>
+					<a href="/app" class="back">{APP_NAME}</a>
+					<div class="presence" class:live={connState === 'open' && partnerConnected}>
+						<span class="presence-title">{presenceLabel}</span>
+						<span class="presence-hint">{presenceHint}</span>
+					</div>
+					<div class="actions">
+						<button
+							type="button"
+							class="icon-btn"
+							aria-expanded={infoOpen}
+							aria-label="Chat details"
+							title="Chat details"
+							onclick={() => (infoOpen = !infoOpen)}
+						>
+							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+								<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.75" />
+								<path
+									d="M12 10v6M12 7h.01"
+									stroke="currentColor"
+									stroke-width="1.75"
+									stroke-linecap="round"
+								/>
+							</svg>
+						</button>
+						<button type="button" onclick={doExport}>Export</button>
+						{#if notifyPerm === 'default'}
+							<button type="button" onclick={enableNotifications}>Enable alerts</button>
+						{:else if notifyPerm === 'granted'}
+							<span class="stat">alerts on</span>
+						{/if}
+					</div>
+				</header>
+
+				{#if showConnBanner}
+					<div
+						class="conn-banner"
+						class:offline
+						class:warn={connState === 'reconnecting' ||
+							connState === 'closed' ||
+							connState === 'error'}
+						class:lost={reconnectStalled}
+						role="status"
+					>
+						<span class="conn-banner-dot" aria-hidden="true"></span>
+						<div class="conn-banner-text">
+							{#if offline}
+								<strong>You appear offline</strong>
+								<span>Messages will send again when your network returns.</span>
+							{:else if reconnectStalled}
+								<strong>Connection lost</strong>
+								<span>Could not restore the secure line automatically.</span>
+							{:else if connState === 'reconnecting'}
+								<strong>
+									{reconnectAttempt > 1
+										? `Reconnecting… (attempt ${reconnectAttempt})`
+										: 'Reconnecting…'}
+								</strong>
+								<span>Restoring your secure connection.</span>
+							{:else}
+								<strong>Connection interrupted</strong>
+								<span>Trying to restore your secure connection.</span>
+							{/if}
+						</div>
+						{#if reconnectStalled}
+							<button
+								type="button"
+								class="conn-reconnect-btn"
+								disabled={reconnectBusy}
+								onclick={() => retryReconnect()}
+							>
+								{reconnectBusy ? 'Reconnecting…' : 'Reconnect now'}
+							</button>
+						{/if}
+					</div>
 				{/if}
-			</div>
-		</header>
 
-		<ConversationTabs variant="compact" />
+				{#if legacyMode}
+					<p class="legacy-banner" role="status">
+						Legacy link (no room PIN). Reconnect may show “secure line full” — create a new chat for
+						reliable rejoin.
+					</p>
+				{/if}
 
-		{#if showConnBanner}
-			<div
-				class="conn-banner"
-				class:offline
-				class:warn={connState === 'reconnecting' || connState === 'closed' || connState === 'error'}
-				class:lost={reconnectStalled}
-				role="status"
-			>
-				<span class="conn-banner-dot" aria-hidden="true"></span>
-				<div class="conn-banner-text">
-					{#if offline}
-						<strong>You appear offline</strong>
-						<span>Messages will send again when your network returns.</span>
-					{:else if reconnectStalled}
-						<strong>Connection lost</strong>
-						<span>Could not restore the secure line automatically.</span>
-					{:else if connState === 'reconnecting'}
-						<strong>
-							{reconnectAttempt > 1 ? `Reconnecting… (attempt ${reconnectAttempt})` : 'Reconnecting…'}
-						</strong>
-						<span>Restoring your secure connection.</span>
-					{:else}
-						<strong>Connection interrupted</strong>
-						<span>Trying to restore your secure connection.</span>
+				{#if infoOpen}
+					<section class="info-panel" aria-label="Chat details">
+						<dl>
+							<div>
+								<dt>Partner name</dt>
+								<dd>
+									<input
+										type="text"
+										class="nick-input"
+										bind:value={editNickname}
+										maxlength="64"
+										placeholder="Local label — only you see this"
+										onchange={() => savePartnerName()}
+									/>
+								</dd>
+							</div>
+							<div>
+								<dt>{LINE_ID_LABEL}</dt>
+								<dd><code>{bucketId}</code></dd>
+							</div>
+							<div>
+								<dt>Relay</dt>
+								<dd><code>{relayUrl || '—'}</code></dd>
+							</div>
+							<div>
+								<dt>Connection</dt>
+								<dd>{connStateLabel()}{connDetail ? ` (${connDetail})` : ''}</dd>
+							</div>
+						</dl>
+						<DeviceSettings compact />
+					</section>
+				{/if}
+
+				{#if error}
+					<p class="err">{error}</p>
+				{/if}
+
+				<div class="list-wrap">
+					<div class="list" bind:this={listEl} onscroll={updateScrollPin}>
+						{#each messages as m (m.id)}
+							<article class:self={m.from === 'self'}>
+								<span class="who">{m.from === 'self' ? 'You' : partnerLabelText}</span>
+								<p>{m.body}</p>
+								<time>{new Date(m.ts).toLocaleTimeString()}</time>
+							</article>
+						{/each}
+					</div>
+
+					{#if showScrollDown}
+						<button type="button" class="scroll-down" onclick={() => scrollToBottom(true)}>
+							New messages ↓
+						</button>
 					{/if}
 				</div>
-				{#if reconnectStalled}
-					<button
-						type="button"
-						class="conn-reconnect-btn"
-						disabled={reconnectBusy}
-						onclick={() => retryReconnect()}
-					>
-						{reconnectBusy ? 'Reconnecting…' : 'Reconnect now'}
+
+				<div class="dock">
+					<button type="button" class="chats-btn" onclick={openChatsSheet}>
+						<span class="chats-label">Tap to see chats</span>
+						{#if hasOtherUnread}
+							<span class="chats-unread" aria-label="Unread"></span>
+						{/if}
 					</button>
-				{/if}
+
+					<form
+						class="composer"
+						onsubmit={(e) => {
+							e.preventDefault();
+							void send();
+						}}
+					>
+						<textarea
+							bind:value={draft}
+							rows="2"
+							placeholder="Message…"
+							onkeydown={onKey}
+							disabled={!key || !!error || connState !== 'open'}
+						></textarea>
+						<button type="submit" disabled={!draft.trim() || !key || !!error || connState !== 'open'}
+							>Send</button
+						>
+					</form>
+
+					<details class="tools">
+						<summary>Export options & report</summary>
+						<label>
+							<input type="checkbox" bind:checked={passOnly} />
+							Passphrase-only export (import without session key)
+						</label>
+						<input type="password" bind:value={exportPass} placeholder="Optional passphrase" />
+						<button type="button" onclick={doExport}>Download export</button>
+						<hr />
+						<input type="text" bind:value={reportNote} placeholder="Report note (no content)" />
+						<button type="button" class="danger" onclick={reportLine}
+							>Report this {SECURE_LINE}</button
+						>
+					</details>
+				</div>
 			</div>
-		{/if}
-
-		{#if legacyMode}
-			<p class="legacy-banner" role="status">
-				Legacy link (no room PIN). Reconnect may show “secure line full” — create a new chat for
-				reliable rejoin.
-			</p>
-		{/if}
-
-		{#if infoOpen}
-			<section class="info-panel" aria-label="Chat details">
-				<dl>
-					<div>
-						<dt>Partner name</dt>
-						<dd>
-							<input
-								type="text"
-								class="nick-input"
-								bind:value={editNickname}
-								maxlength="64"
-								placeholder="Local label — only you see this"
-								onchange={() => savePartnerName()}
-							/>
-						</dd>
-					</div>
-					<div>
-						<dt>{LINE_ID_LABEL}</dt>
-						<dd><code>{bucketId}</code></dd>
-					</div>
-					<div>
-						<dt>Relay</dt>
-						<dd><code>{relayUrl || '—'}</code></dd>
-					</div>
-					<div>
-						<dt>Connection</dt>
-						<dd>{connStateLabel()}{connDetail ? ` (${connDetail})` : ''}</dd>
-					</div>
-				</dl>
-				<DeviceSettings compact />
-			</section>
-		{/if}
-
-		{#if error}
-			<p class="err">{error}</p>
-		{/if}
-
-		<div class="list-wrap">
-			<div class="list" bind:this={listEl} onscroll={updateScrollPin}>
-				{#each messages as m (m.id)}
-					<article class:self={m.from === 'self'}>
-						<span class="who">{m.from === 'self' ? 'You' : partnerLabelText}</span>
-						<p>{m.body}</p>
-						<time>{new Date(m.ts).toLocaleTimeString()}</time>
-					</article>
-				{/each}
-			</div>
-
-			{#if showScrollDown}
-				<button type="button" class="scroll-down" onclick={() => scrollToBottom(true)}>
-					New messages ↓
-				</button>
-			{/if}
-		</div>
-
-		<div class="dock">
-			<form
-				class="composer"
-				onsubmit={(e) => {
-					e.preventDefault();
-					void send();
-				}}
-			>
-				<textarea
-					bind:value={draft}
-					rows="2"
-					placeholder="Message…"
-					onkeydown={onKey}
-					disabled={!key || !!error || connState !== 'open'}
-				></textarea>
-				<button type="submit" disabled={!draft.trim() || !key || !!error || connState !== 'open'}
-					>Send</button
-				>
-			</form>
-
-			<details class="tools">
-				<summary>Export options & report</summary>
-				<label>
-					<input type="checkbox" bind:checked={passOnly} />
-					Passphrase-only export (import without session key)
-				</label>
-				<input type="password" bind:value={exportPass} placeholder="Optional passphrase" />
-				<button type="button" onclick={doExport}>Download export</button>
-				<hr />
-				<input type="text" bind:value={reportNote} placeholder="Report note (no content)" />
-				<button type="button" class="danger" onclick={reportLine}>Report this {SECURE_LINE}</button>
-			</details>
 		</div>
 	{/if}
 
@@ -718,6 +866,10 @@
 			</div>
 		</div>
 	{/if}
+
+	{#if chatsOpen}
+		<ChatListSheet open={chatsOpen} onClose={() => (chatsOpen = false)} />
+	{/if}
 </main>
 
 <style>
@@ -731,6 +883,46 @@
 		flex-direction: column;
 		padding: 1rem 1rem 0;
 		gap: 0.75rem;
+		overflow: hidden;
+	}
+
+	@media (min-width: 720px) {
+		.chat {
+			max-width: min(72rem, 100%);
+			padding: 1rem 1.25rem 0;
+		}
+	}
+
+	.chat-shell {
+		display: flex;
+		flex: 1;
+		min-height: 0;
+		gap: 0.75rem;
+	}
+
+	.chat-sidebar {
+		display: none;
+		width: 17rem;
+		flex-shrink: 0;
+		min-height: 0;
+		overflow: hidden;
+		border-radius: 0.5rem;
+	}
+
+	@media (min-width: 720px) {
+		.chat-sidebar {
+			display: flex;
+			flex-direction: column;
+		}
+	}
+
+	.chat-main {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		min-height: 0;
 		overflow: hidden;
 	}
 
@@ -830,6 +1022,11 @@
 		background: var(--accent);
 		color: #06110d;
 		font-weight: 600;
+	}
+
+	.copy-btn:disabled {
+		opacity: 0.6;
+		cursor: wait;
 	}
 
 	.primary {
@@ -1298,12 +1495,75 @@
 
 	.dock {
 		flex-shrink: 0;
-		padding: 0.65rem 0 calc(0.85rem + env(safe-area-inset-bottom, 0px));
-		background: var(--bg0);
-		border-top: 1px solid var(--line);
 		display: flex;
 		flex-direction: column;
 		gap: 0.5rem;
+		padding: 0 0 calc(0.85rem + env(safe-area-inset-bottom, 0px));
+		background: var(--bg0);
+		border: 1px solid var(--line);
+		border-top: none;
+		border-bottom: none;
+		border-radius: 0;
+		overflow: visible;
+	}
+
+	.chats-btn {
+		font: inherit;
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.45rem;
+		width: 100%;
+		margin: 0;
+		padding: 0.35rem 1rem 0;
+		border: none;
+		background: var(--accent);
+		color: black;
+		/* Upside moon: full height at center, ~0 at both edges */
+		height: 2rem;
+		border-radius: 0;
+		clip-path: ellipse(50% 100% at 50% 100%);
+		font-size: 0.82rem;
+		font-weight: 700;
+		letter-spacing: 0.02em;
+		line-height: 1;
+		flex-shrink: 0;
+	}
+
+	.chats-btn:hover {
+		filter: brightness(1.05);
+	}
+
+	@media (min-width: 720px) {
+		.chats-btn {
+			display: none !important;
+		}
+	}
+
+	.chats-label {
+		text-align: center;
+		padding-bottom: 0.15rem;
+	}
+
+	.chats-unread {
+		width: 0.45rem;
+		height: 0.45rem;
+		border-radius: 50%;
+		background: black;
+		flex-shrink: 0;
+	}
+
+	.dock .composer,
+	.dock .tools {
+		margin-left: 0;
+		margin-right: 0;
+		padding-left: 0.75rem;
+		padding-right: 0.75rem;
+	}
+
+	.dock .composer {
+		padding-top: 0.35rem;
 	}
 
 	article {

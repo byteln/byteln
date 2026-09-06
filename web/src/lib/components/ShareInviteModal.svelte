@@ -1,5 +1,5 @@
 <script lang="ts">
-	import ResharePinPanel from '$lib/components/ResharePinPanel.svelte';
+	import ShareInvitePanel from '$lib/components/ShareInvitePanel.svelte';
 	import type { RoomRecord } from '$lib/storage/history';
 
 	type Props = {
@@ -11,12 +11,13 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_interactive_supports_focus -->
-<div class="modal-overlay" role="dialog" tabindex="-1" aria-labelledby="reshare-title" onclick={onClose}>
+<div class="modal-overlay" role="dialog" tabindex="-1" aria-labelledby="share-title" onclick={onClose}>
 	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<div class="modal-dialog" onclick={(e) => e.stopPropagation()}>
-		<h3 id="reshare-title">Reshare room PIN</h3>
+		<h3 id="share-title">Share</h3>
 		<p class="modal-hint">For “{room.nickname}” — only you can see this.</p>
-		<ResharePinPanel bucketId={room.bucketId} />
+		<ShareInvitePanel bucketId={room.bucketId} />
 		<div class="modal-actions">
 			<button type="button" onclick={onClose}>Close</button>
 		</div>

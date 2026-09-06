@@ -22,7 +22,7 @@ export type RoomRecord = {
 	unread?: boolean;
 	credentialsEnc?: EncryptedBlob;
 	legacy?: boolean;
-	/** True when you created this room (seat 0) — can reshare the room PIN. */
+	/** True when you created this room (seat 0) — can share the invite (link + PIN). */
 	isCreator?: boolean;
 };
 

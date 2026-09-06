@@ -2,6 +2,7 @@
 	import ShareQr from '$lib/components/ShareQr.svelte';
 	import { shareRoomHash } from '$lib/crypto/room';
 	import { connectionManager } from '$lib/relay/connection-manager';
+	import { inviteText, shareInvite } from '$lib/share';
 	import { getRoom, type RoomRecord } from '$lib/storage/history';
 	import { onMount } from 'svelte';
 
@@ -18,6 +19,8 @@
 	let error = $state('');
 	let busy = $state(false);
 	let copied = $state(false);
+	let shareBusy = $state<'qr' | 'invite' | null>(null);
+	let shareFlash = $state<'qr' | 'invite' | null>(null);
 	let needsAppPin = $state(false);
 	let unrecoverable = $state(false);
 
@@ -81,26 +84,78 @@
 
 	async function copyShareAndPin() {
 		if (!roomPin) return;
-		const text = `Open this link in your browser:\n${shareUrl()}\n\nRoom PIN (enter separately — do not paste into the URL):\n${roomPin}`;
-		await navigator.clipboard.writeText(text);
+		await navigator.clipboard.writeText(inviteText(shareUrl(), roomPin));
 		copied = true;
 		setTimeout(() => (copied = false), 1500);
+	}
+
+	function flashShare(kind: 'qr' | 'invite') {
+		shareFlash = kind;
+		setTimeout(() => {
+			if (shareFlash === kind) shareFlash = null;
+		}, 1500);
+	}
+
+	async function shareQr() {
+		if (!roomPin || shareBusy) return;
+		shareBusy = 'qr';
+		try {
+			const result = await shareInvite({
+				url: shareUrl(),
+				pin: roomPin,
+				withQr: true,
+				qrFilename: `byteln-${bucketId}-qr.png`
+			});
+			if (result !== 'cancelled') flashShare('qr');
+		} finally {
+			shareBusy = null;
+		}
+	}
+
+	async function shareInviteText() {
+		if (!roomPin || shareBusy) return;
+		shareBusy = 'invite';
+		try {
+			const result = await shareInvite({
+				url: shareUrl(),
+				pin: roomPin,
+				withQr: false
+			});
+			if (result !== 'cancelled') flashShare('invite');
+		} finally {
+			shareBusy = null;
+		}
 	}
 </script>
 
 {#if room?.isCreator && !room.legacy}
-	<div class="reshare" class:compact>
+	<div class="share-invite" class:compact>
 		{#if !compact}
-			<h3 class="title">Partner forgot the room PIN?</h3>
+			<h3 class="title">Share link and PIN</h3>
 		{/if}
 
 		{#if roomPin}
-			<p class="hint">Reshare the link and PIN separately — never paste the PIN into the URL.</p>
+			<p class="hint">Share the link and PIN separately — never paste the PIN into the URL.</p>
 			<p class="pin-display" aria-label="Room PIN">{roomPin}</p>
 			<ShareQr value={shareUrl()} compact />
 			<div class="actions">
+				<button type="button" class="inline-btn" disabled={shareBusy !== null} onclick={() => void shareQr()}>
+					{shareFlash === 'qr' ? 'Shared' : shareBusy === 'qr' ? 'Sharing…' : 'Share QR'}
+				</button>
+				<button
+					type="button"
+					class="inline-btn primary"
+					disabled={shareBusy !== null}
+					onclick={() => void shareInviteText()}
+				>
+					{shareFlash === 'invite'
+						? 'Shared'
+						: shareBusy === 'invite'
+							? 'Sharing…'
+							: 'Share link + PIN'}
+				</button>
 				<button type="button" class="inline-btn" onclick={copyPin}>{copied ? 'Copied' : 'Copy PIN'}</button>
-				<button type="button" class="inline-btn primary" onclick={copyShareAndPin}>
+				<button type="button" class="inline-btn" onclick={copyShareAndPin}>
 					{copied ? 'Copied' : 'Copy link + PIN'}
 				</button>
 			</div>
@@ -139,7 +194,7 @@
 {/if}
 
 <style>
-	.reshare {
+	.share-invite {
 		margin-top: 0.5rem;
 		padding-top: 0.65rem;
 		border-top: 1px dashed var(--line);
@@ -148,7 +203,7 @@
 		gap: 0.5rem;
 	}
 
-	.reshare.compact {
+	.share-invite.compact {
 		margin-top: 0;
 		padding-top: 0;
 		border-top: none;

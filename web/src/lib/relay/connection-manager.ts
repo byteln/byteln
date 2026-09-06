@@ -303,7 +303,7 @@ class ConnectionManagerImpl {
 
 	private syncRuntimes() {
 		const out: Record<string, RoomRuntime> = {};
-		for (const [id, r] of this.rooms) out[id] = r.runtime;
+		for (const [id, r] of this.rooms) out[id] = { ...r.runtime };
 		roomRuntimes.set(out);
 	}
 

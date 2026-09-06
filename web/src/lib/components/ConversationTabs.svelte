@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { connectionManager, activeBucketId, roomRuntimes } from '$lib/relay/connection-manager';
+	import { connectionManager, activeBucketId, roomRuntimes, messagesByBucket } from '$lib/relay/connection-manager';
 	import { bumpRooms, roomsRevision } from '$lib/stores/conversations';
 	import {
 		defaultNickname,
@@ -11,13 +11,14 @@
 	} from '$lib/storage/history';
 	import { LINE_ID_LABEL } from '$lib/brand';
 	import { onMount } from 'svelte';
-	import ResharePinModal from '$lib/components/ResharePinModal.svelte';
+	import ShareInviteModal from '$lib/components/ShareInviteModal.svelte';
 
 	type Props = {
-		variant: 'home' | 'compact';
+		variant: 'home' | 'sheet';
+		onSelect?: () => void;
 	};
 
-	let { variant }: Props = $props();
+	let { variant, onSelect }: Props = $props();
 
 	let rooms = $state<RoomRecord[]>([]);
 	let loaded = $state(false);
@@ -26,7 +27,7 @@
 	let menuPos = $state<{ bucketId: string; top: number; left: number } | null>(null);
 	let forgetRoom = $state<RoomRecord | null>(null);
 	let forgetWipe = $state(false);
-	let reshareRoom = $state<RoomRecord | null>(null);
+	let shareRoom = $state<RoomRecord | null>(null);
 
 	const activeId = $derived($activeBucketId);
 
@@ -70,24 +71,22 @@
 	}
 
 	function roomHasPeerTraffic(bucketId: string): boolean {
-		const msgs = connectionManager.getMessages(bucketId);
+		const msgs = $messagesByBucket[bucketId] ?? [];
 		return msgs.some((m) => m.from === 'peer');
 	}
 
 	async function openChat(room: RoomRecord) {
 		closeMenu();
 		await connectionManager.navigateToRoom(room.bucketId);
+		onSelect?.();
 	}
 
 	function openMenu(bucketId: string, e: MouseEvent) {
 		e.stopPropagation();
 		const btn = e.currentTarget as HTMLElement;
 		const rect = btn.getBoundingClientRect();
-		const menuWidth = variant === 'compact' ? 11.5 : 13;
-		const left =
-			variant === 'compact'
-				? Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth * 16 - 8))
-				: Math.max(8, rect.right - menuWidth * 16);
+		const menuWidth = 13;
+		const left = Math.max(8, rect.right - menuWidth * 16);
 		menuPos = { bucketId, top: rect.bottom + 4, left };
 	}
 
@@ -122,13 +121,13 @@
 		closeMenu();
 	}
 
-	function startReshare(room: RoomRecord) {
-		reshareRoom = room;
+	function startShare(room: RoomRecord) {
+		shareRoom = room;
 		closeMenu();
 	}
 
-	function closeReshare() {
-		reshareRoom = null;
+	function closeShare() {
+		shareRoom = null;
 	}
 
 	async function confirmForget() {
@@ -159,94 +158,69 @@
 
 <svelte:window onclick={onDocClick} />
 
-{#if variant === 'home'}
-	<section class="home-list" aria-label="Your chats">
-		<h2 class="list-label">Your chats</h2>
-		{#if loaded && rooms.length === 0}
-			<div class="empty-state">
-				<svg width="40" height="24" viewBox="0 0 40 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-					<line x1="8" y1="12" x2="32" y2="12" stroke="#232830" stroke-width="1.5" />
-					<circle cx="8" cy="12" r="5" fill="#090B0D" stroke="#34D399" stroke-width="2" />
-					<circle cx="32" cy="12" r="5" fill="#090B0D" stroke="#34D399" stroke-width="2" />
-				</svg>
-				<p>No lines yet. Start one below, or open a link someone sent you.</p>
-			</div>
-		{:else if rooms.length > 0}
-			<ul class="chat-list" role="list">
-				{#each rooms as room (room.bucketId)}
-					<li class="chat-row">
-						<button type="button" class="chat-open" onclick={() => openChat(room)}>
-							<span class={['chat-status', connDotForRoom(room)]} aria-hidden="true"></span>
-							<span class="chat-main">
-								<span class="chat-top-row">
-									<span class="chat-name">{room.nickname}</span>
-									<time class="chat-time" datetime={new Date(room.lastActiveAt).toISOString()}>
-										{formatTime(room.lastActiveAt)}
-									</time>
-								</span>
-								<span class="chat-preview">
-									<span class="chat-id" title={LINE_ID_LABEL}>{room.bucketId}</span>
-									{#if room.lastPreview}
-										· {room.lastPreview}
-									{/if}
-									{#if room.unread && activeId !== room.bucketId}
-										<span class="unread" aria-label="Unread">●</span>
-									{/if}
-								</span>
-							</span>
-						</button>
-						<button
-							type="button"
-							class="chat-more"
-							aria-label="Line options"
-							aria-haspopup="menu"
-							aria-expanded={menuPos?.bucketId === room.bucketId}
-							onclick={(e) => openMenu(room.bucketId, e)}
-						>
-							<svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-								<circle cx="10" cy="4" r="1.5" fill="currentColor" />
-								<circle cx="10" cy="10" r="1.5" fill="currentColor" />
-								<circle cx="10" cy="16" r="1.5" fill="currentColor" />
-							</svg>
-						</button>
-					</li>
-				{/each}
-			</ul>
-		{/if}
-	</section>
-{:else if rooms.length > 0}
-	<div class="tab-bar-wrap">
-		<div class="tab-bar" role="tablist" aria-label="Conversations">
+{#snippet chatListBody()}
+	{#if loaded && rooms.length === 0}
+		<div class="empty-state">
+			<svg width="40" height="24" viewBox="0 0 40 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+				<line x1="8" y1="12" x2="32" y2="12" stroke="#232830" stroke-width="1.5" />
+				<circle cx="8" cy="12" r="5" fill="#090B0D" stroke="#34D399" stroke-width="2" />
+				<circle cx="32" cy="12" r="5" fill="#090B0D" stroke="#34D399" stroke-width="2" />
+			</svg>
+			<p>No lines yet. Start one below, or open a link someone sent you.</p>
+		</div>
+	{:else if rooms.length > 0}
+		<ul class="chat-list" role="list">
 			{#each rooms as room (room.bucketId)}
-				<div class="tab-wrap" class:active={activeId === room.bucketId}>
-					<button
-						type="button"
-						role="tab"
-						class="tab"
-						aria-selected={activeId === room.bucketId}
-						onclick={() => openChat(room)}
-					>
-						<span class="dot {connDotForRoom(room)}" aria-hidden="true"></span>
-						<span class="tab-label">{room.nickname}</span>
-						{#if room.unread && activeId !== room.bucketId}
-							<span class="badge" aria-label="Unread"></span>
-						{/if}
+				<li class="chat-row" class:active={activeId === room.bucketId}>
+					<button type="button" class="chat-open" onclick={() => openChat(room)}>
+						<span class={['chat-status', connDotForRoom(room)]} aria-hidden="true"></span>
+						<span class="chat-main">
+							<span class="chat-top-row">
+								<span class="chat-name">{room.nickname}</span>
+								<time class="chat-time" datetime={new Date(room.lastActiveAt).toISOString()}>
+									{formatTime(room.lastActiveAt)}
+								</time>
+							</span>
+							<span class="chat-preview">
+								<span class="chat-id" title={LINE_ID_LABEL}>{room.bucketId}</span>
+								{#if room.lastPreview}
+									· {room.lastPreview}
+								{/if}
+								{#if room.unread && activeId !== room.bucketId}
+									<span class="unread" aria-label="Unread">●</span>
+								{/if}
+							</span>
+						</span>
 					</button>
 					<button
 						type="button"
-						class="tab-menu"
-						aria-label="Options for {room.nickname}"
+						class="chat-more"
+						aria-label="Line options"
 						aria-haspopup="menu"
 						aria-expanded={menuPos?.bucketId === room.bucketId}
 						onclick={(e) => openMenu(room.bucketId, e)}
 					>
-						⋯
+						<svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+							<circle cx="10" cy="4" r="1.5" fill="currentColor" />
+							<circle cx="10" cy="10" r="1.5" fill="currentColor" />
+							<circle cx="10" cy="16" r="1.5" fill="currentColor" />
+						</svg>
 					</button>
-				</div>
+				</li>
 			{/each}
-			<button type="button" class="tab new-tab" onclick={() => goto('/app')}>+ New</button>
-		</div>
-	</div>
+		</ul>
+	{/if}
+{/snippet}
+
+{#if variant === 'home'}
+	<section class="home-list" aria-label="Your chats">
+		<h2 class="list-label">Your chats</h2>
+		{@render chatListBody()}
+	</section>
+{:else}
+	<section class="sheet-list" aria-label="Your chats">
+		{@render chatListBody()}
+	</section>
 {/if}
 
 {#if menuPos && menuRoom}
@@ -261,8 +235,8 @@
 	>
 		<button type="button" role="menuitem" onclick={() => startRename(menuRoom)}>Rename partner</button>
 		{#if menuRoom.isCreator && !menuRoom.legacy}
-			<button type="button" role="menuitem" onclick={() => startReshare(menuRoom)}>
-				Reshare room PIN…
+			<button type="button" role="menuitem" onclick={() => startShare(menuRoom)}>
+				Share…
 			</button>
 		{/if}
 		<button type="button" role="menuitem" class="danger" onclick={() => askForget(menuRoom)}>
@@ -271,8 +245,8 @@
 	</div>
 {/if}
 
-{#if reshareRoom}
-	<ResharePinModal room={reshareRoom} onClose={closeReshare} />
+{#if shareRoom}
+	<ShareInviteModal room={shareRoom} onClose={closeShare} />
 {/if}
 
 {#if editingRoom}
@@ -346,6 +320,14 @@
 		letter-spacing: 0.04em;
 	}
 
+	.sheet-list .chat-list {
+		margin-bottom: 0;
+	}
+
+	.sheet-list .empty-state {
+		margin-bottom: 0;
+	}
+
 	.chat-list {
 		list-style: none;
 		margin: 0 0 28px;
@@ -367,6 +349,12 @@
 
 	.chat-row:active {
 		background: var(--surface-2, #171b21);
+	}
+
+	.chat-row.active {
+		border-color: rgba(61, 220, 176, 0.45);
+		background: rgba(61, 220, 176, 0.08);
+		box-shadow: inset 0 0 0 1px rgba(61, 220, 176, 0.12);
 	}
 
 	.chat-open {
@@ -393,13 +381,13 @@
 	}
 
 	.chat-status.live {
-		background: var(--accent);
-		box-shadow: 0 0 0 3px var(--accent-soft, var(--accent-dim));
+		background: #3ddcb0;
+		box-shadow: 0 0 0 3px rgba(61, 220, 176, 0.28);
 	}
 
 	.chat-status.wait {
-		background: var(--accent);
-		opacity: 0.45;
+		background: #5b9cff;
+		opacity: 1;
 	}
 
 	.chat-status.reconnecting {
@@ -499,17 +487,6 @@
 		line-height: 1.6;
 	}
 
-	.tab-menu {
-		font: inherit;
-		cursor: pointer;
-		border: 1px solid var(--line);
-		background: transparent;
-		color: var(--muted);
-		border-radius: 0.35rem;
-		padding: 0 0.45rem;
-		flex-shrink: 0;
-	}
-
 	.menu-portal {
 		position: fixed;
 		z-index: 200;
@@ -542,124 +519,6 @@
 
 	.menu-portal .danger {
 		color: var(--danger);
-	}
-
-	.tab-bar-wrap {
-		flex-shrink: 0;
-		margin: 0 -0.25rem;
-		padding: 0 0.25rem;
-	}
-
-	.tab-bar {
-		display: flex;
-		gap: 0.35rem;
-		overflow-x: auto;
-		overflow-y: hidden;
-		padding-bottom: 0.25rem;
-		-webkit-overflow-scrolling: touch;
-		scrollbar-width: thin;
-	}
-
-	.tab-wrap {
-		display: flex;
-		align-items: stretch;
-		flex-shrink: 0;
-	}
-
-	.tab,
-	.tab-wrap .tab-menu {
-		border: 1px solid var(--line);
-		background: rgba(18, 26, 23, 0.55);
-		color: var(--muted);
-		transition:
-			color 0.15s ease,
-			border-color 0.15s ease,
-			background 0.15s ease;
-	}
-
-	.tab {
-		display: flex;
-		align-items: center;
-		gap: 0.35rem;
-		padding: 0.45rem 0.65rem;
-		border-radius: 0.35rem 0 0 0.35rem;
-		font: inherit;
-		font-size: 0.85rem;
-		cursor: pointer;
-		max-width: 9rem;
-	}
-
-	.tab-wrap .tab-menu {
-		border-radius: 0 0.35rem 0.35rem 0;
-		border-left: none;
-	}
-
-	.tab-wrap.active .tab,
-	.tab-wrap.active .tab-menu {
-		border-color: rgba(61, 220, 176, 0.45);
-		background: rgba(18, 26, 23, 0.72);
-		color: var(--ink);
-	}
-
-	.tab-wrap.active .tab {
-		box-shadow: inset 0 -2px 0 var(--accent);
-	}
-
-	.tab:hover,
-	.tab-wrap .tab-menu:hover {
-		border-color: rgba(61, 220, 176, 0.3);
-		color: var(--ink);
-	}
-
-	.tab-label {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.new-tab {
-		border-radius: 0.35rem;
-		border: 1px solid var(--line);
-		background: rgba(18, 26, 23, 0.55);
-		color: var(--accent);
-		flex-shrink: 0;
-		padding: 0.45rem 0.65rem;
-		font: inherit;
-		font-size: 0.85rem;
-		cursor: pointer;
-	}
-
-	.tab .badge {
-		width: 0.45rem;
-		height: 0.45rem;
-		border-radius: 50%;
-		background: var(--accent);
-		flex-shrink: 0;
-	}
-
-	.dot {
-		width: 0.45rem;
-		height: 0.45rem;
-		border-radius: 50%;
-		flex-shrink: 0;
-		background: var(--muted);
-		opacity: 0.5;
-	}
-
-	.dot.live {
-		background: var(--accent);
-		opacity: 1;
-	}
-
-	.dot.wait {
-		background: var(--accent);
-		opacity: 0.45;
-	}
-
-	.dot.reconnecting {
-		background: #ffc14d;
-		opacity: 1;
-		animation: dot-pulse 1.4s ease-in-out infinite;
 	}
 
 	@keyframes dot-pulse {
