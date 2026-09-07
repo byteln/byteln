@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
 	import ConversationTabs from '$lib/components/ConversationTabs.svelte';
+	import { startSecureLine } from '$lib/rooms/start-line';
 
 	type Props = {
 		open: boolean;
@@ -8,6 +8,7 @@
 	};
 
 	let { open, onClose }: Props = $props();
+	let busy = $state(false);
 
 	function onKeydown(e: KeyboardEvent) {
 		if (!open) return;
@@ -15,8 +16,14 @@
 	}
 
 	async function newLine() {
-		await goto('/app');
-		onClose();
+		if (busy) return;
+		busy = true;
+		try {
+			onClose();
+			await startSecureLine();
+		} finally {
+			busy = false;
+		}
 	}
 </script>
 
@@ -34,7 +41,9 @@
 		>
 			<header class="sheet-header">
 				<h2 id="chats-sheet-title">Your chats</h2>
-				<button type="button" class="new-line" onclick={() => void newLine()}>New line</button>
+				<button type="button" class="new-line" disabled={busy} onclick={() => void newLine()}>
+					{busy ? 'Opening…' : 'New secure line'}
+				</button>
 			</header>
 			<div class="sheet-body">
 				<ConversationTabs variant="sheet" onSelect={onClose} />
@@ -101,11 +110,16 @@
 		border-radius: 0.35rem;
 		padding: 0.45rem 0.75rem;
 		border: 1px solid var(--line);
-		background: transparent;
-		color: var(--accent);
-		font-weight: 600;
+		background: var(--accent);
+		color: #06110d;
+		font-weight: 700;
 		font-size: 0.88rem;
 		flex-shrink: 0;
+	}
+
+	.new-line:disabled {
+		opacity: 0.65;
+		cursor: wait;
 	}
 
 	.sheet-body {

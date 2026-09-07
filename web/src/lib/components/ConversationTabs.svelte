@@ -84,13 +84,29 @@
 		e.stopPropagation();
 		const btn = e.currentTarget as HTMLElement;
 		const rect = btn.getBoundingClientRect();
-		const menuWidth = 13;
-		const left = Math.max(8, rect.right - menuWidth * 16);
-		menuPos = { bucketId, top: rect.bottom + 4, left };
+		const menuWidthPx = 13 * 16;
+		const menuHeightPx = 160;
+		const left = Math.max(8, Math.min(rect.right - menuWidthPx, window.innerWidth - menuWidthPx - 8));
+		const spaceBelow = window.innerHeight - rect.bottom;
+		const top =
+			spaceBelow < menuHeightPx + 8
+				? Math.max(8, rect.top - menuHeightPx - 4)
+				: rect.bottom + 4;
+		menuPos = { bucketId, top, left };
 	}
 
 	function closeMenu() {
 		menuPos = null;
+	}
+
+	/** Move fixed menus to document.body so sheet/side-panel overflow does not clip them. */
+	function portal(node: HTMLElement) {
+		document.body.appendChild(node);
+		return {
+			destroy() {
+				node.remove();
+			}
+		};
 	}
 
 	function startRename(room: RoomRecord) {
@@ -162,7 +178,7 @@
 				<circle cx="8" cy="12" r="5" fill="#090B0D" stroke="#34D399" stroke-width="2" />
 				<circle cx="32" cy="12" r="5" fill="#090B0D" stroke="#34D399" stroke-width="2" />
 			</svg>
-			<p>No lines yet. Start one below, or open a link someone sent you.</p>
+			<p>No lines yet. Tap New secure line above to start one.</p>
 		</div>
 	{:else if rooms.length > 0}
 		<ul class="chat-list" role="list">
@@ -226,6 +242,7 @@
 		style:left="{menuPos.left}px"
 		role="menu"
 		tabindex="-1"
+		use:portal
 		onclick={(e) => e.stopPropagation()}
 		onkeydown={(e) => e.stopPropagation()}
 	>
@@ -484,7 +501,7 @@
 
 	.menu-portal {
 		position: fixed;
-		z-index: 200;
+		z-index: 400;
 		min-width: 11.5rem;
 		background: var(--bg1);
 		border: 1px solid var(--line);

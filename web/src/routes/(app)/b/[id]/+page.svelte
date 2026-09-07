@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { env } from '$env/dynamic/public';
+	import AppSettings from '$lib/components/AppSettings.svelte';
 	import ChatListSheet from '$lib/components/ChatListSheet.svelte';
 	import ChatListSidePanel from '$lib/components/ChatListSidePanel.svelte';
 	import DeviceSettings from '$lib/components/DeviceSettings.svelte';
+	import ShareInviteModal from '$lib/components/ShareInviteModal.svelte';
 	import ShareQr from '$lib/components/ShareQr.svelte';
 	import {
 		exportHistory,
@@ -77,6 +79,8 @@
 	let legacyMode = $state(false);
 	let isCreator = $state(false);
 	let chatsOpen = $state(false);
+	let settingsOpen = $state(false);
+	let shareRoom = $state<RoomRecord | null>(null);
 	let rooms = $state<RoomRecord[]>([]);
 
 	let listEl = $state<HTMLElement | null>(null);
@@ -121,6 +125,14 @@
 		if (connState === 'closed') return 'Disconnected';
 		return partnerConnected ? `${partnerLabelText} connected` : `Waiting for ${partnerLabelText}`;
 	});
+
+	const presenceWaiting = $derived(
+		phase === 'chat' &&
+			!offline &&
+			connState === 'open' &&
+			!partnerConnected &&
+			!reconnectStalled
+	);
 
 	const presenceHint = $derived.by(() => {
 		if (phase === 'creator_share') return 'Share the link and PIN with your partner separately.';
@@ -411,6 +423,12 @@
 		notifyPerm = await ensureNotifyPermission();
 	}
 
+	async function openShare() {
+		const rec = await getRoom(bucketId);
+		if (!rec || !rec.isCreator || rec.legacy) return;
+		shareRoom = rec;
+	}
+
 	async function send() {
 		const body = draft.trim();
 		if (!body || !key || connState !== 'open') return;
@@ -660,36 +678,130 @@
 			</aside>
 			<div class="chat-main">
 				<header>
-					<a href="/app" class="back">{APP_NAME}</a>
-					<div class="presence" class:live={connState === 'open' && partnerConnected}>
-						<span class="presence-title">{presenceLabel}</span>
-						<span class="presence-hint">{presenceHint}</span>
+					<div class="header-top">
+						<a href="/app" class="back">{APP_NAME}</a>
+						<div class="actions">
+							{#if isCreator && !legacyMode}
+								<button
+									type="button"
+									class="icon-btn"
+									aria-label="Share invite"
+									title="Share"
+									onclick={() => void openShare()}
+								>
+									<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+										<circle cx="18" cy="5" r="2.25" stroke="currentColor" stroke-width="1.75" />
+										<circle cx="6" cy="12" r="2.25" stroke="currentColor" stroke-width="1.75" />
+										<circle cx="18" cy="19" r="2.25" stroke="currentColor" stroke-width="1.75" />
+										<path
+											d="M8.1 10.9l7.8-4.3M8.1 13.1l7.8 4.3"
+											stroke="currentColor"
+											stroke-width="1.75"
+											stroke-linecap="round"
+										/>
+									</svg>
+								</button>
+							{/if}
+							<button
+								type="button"
+								class="icon-btn"
+								aria-label="Settings"
+								title="Settings"
+								onclick={() => (settingsOpen = true)}
+							>
+								<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+									<path
+										d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7z"
+										stroke="currentColor"
+										stroke-width="1.75"
+									/>
+									<path
+										d="M19.4 13a7.6 7.6 0 000-2l2-1.2-2-3.4-2.3.6a7.7 7.7 0 00-1.7-1L15 3.5h-4l-.4 2.5a7.7 7.7 0 00-1.7 1L6.6 6.4l-2 3.4 2 1.2a7.6 7.6 0 000 2l-2 1.2 2 3.4 2.3-.6a7.7 7.7 0 001.7 1l.4 2.5h4l.4-2.5a7.7 7.7 0 001.7-1l2.3.6 2-3.4-2-1.2z"
+										stroke="currentColor"
+										stroke-width="1.75"
+										stroke-linejoin="round"
+									/>
+								</svg>
+							</button>
+							<button
+								type="button"
+								class="icon-btn"
+								aria-expanded={infoOpen}
+								aria-label="Chat details"
+								title="Chat details"
+								onclick={() => (infoOpen = !infoOpen)}
+							>
+								<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+									<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.75" />
+									<path
+										d="M12 10v6M12 7h.01"
+										stroke="currentColor"
+										stroke-width="1.75"
+										stroke-linecap="round"
+									/>
+								</svg>
+							</button>
+							<button
+								type="button"
+								class="icon-btn"
+								aria-label="Export chat"
+								title="Export"
+								onclick={doExport}
+							>
+								<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+									<path
+										d="M12 3v12m0 0l-4-4m4 4l4-4M5 19h14"
+										stroke="currentColor"
+										stroke-width="1.75"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+									/>
+								</svg>
+							</button>
+							{#if notifyPerm === 'default'}
+								<button
+									type="button"
+									class="icon-btn"
+									aria-label="Enable alerts"
+									title="Enable alerts"
+									onclick={enableNotifications}
+								>
+									<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+										<path
+											d="M6 17h12l-1.2-1.2A2 2 0 0116 14.3V11a4 4 0 10-8 0v3.3c0 .5-.2 1-.6 1.4L6 17z"
+											stroke="currentColor"
+											stroke-width="1.75"
+											stroke-linejoin="round"
+										/>
+										<path d="M10 17a2 2 0 004 0" stroke="currentColor" stroke-width="1.75" />
+									</svg>
+								</button>
+							{:else if notifyPerm === 'granted'}
+								<span class="stat icon-stat" title="Alerts on" aria-label="Alerts on">
+									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+										<path
+											d="M6 17h12l-1.2-1.2A2 2 0 0116 14.3V11a4 4 0 10-8 0v3.3c0 .5-.2 1-.6 1.4L6 17z"
+											stroke="currentColor"
+											stroke-width="1.75"
+											stroke-linejoin="round"
+										/>
+										<path d="M10 17a2 2 0 004 0" stroke="currentColor" stroke-width="1.75" />
+									</svg>
+								</span>
+							{/if}
+						</div>
 					</div>
-					<div class="actions">
-						<button
-							type="button"
-							class="icon-btn"
-							aria-expanded={infoOpen}
-							aria-label="Chat details"
-							title="Chat details"
-							onclick={() => (infoOpen = !infoOpen)}
-						>
-							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-								<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.75" />
-								<path
-									d="M12 10v6M12 7h.01"
-									stroke="currentColor"
-									stroke-width="1.75"
-									stroke-linecap="round"
-								/>
-							</svg>
-						</button>
-						<button type="button" onclick={doExport}>Export</button>
-						{#if notifyPerm === 'default'}
-							<button type="button" onclick={enableNotifications}>Enable alerts</button>
-						{:else if notifyPerm === 'granted'}
-							<span class="stat">alerts on</span>
-						{/if}
+					<div
+						class="presence"
+						class:live={connState === 'open' && partnerConnected}
+						class:waiting={presenceWaiting}
+						title={presenceHint}
+					>
+						<span class="presence-title">
+							{presenceLabel}{#if presenceWaiting}<span class="wait-dots" aria-hidden="true"
+									><span></span><span></span><span></span></span
+								>{/if}
+						</span>
 					</div>
 				</header>
 
@@ -806,39 +918,41 @@
 						{/if}
 					</button>
 
-					<form
-						class="composer"
-						onsubmit={(e) => {
-							e.preventDefault();
-							void send();
-						}}
-					>
-						<textarea
-							bind:value={draft}
-							rows="2"
-							placeholder="Message…"
-							onkeydown={onKey}
-							disabled={!key || !!error || connState !== 'open'}
-						></textarea>
-						<button type="submit" disabled={!draft.trim() || !key || !!error || connState !== 'open'}
-							>Send</button
+					<div class="dock-body">
+						<form
+							class="composer"
+							onsubmit={(e) => {
+								e.preventDefault();
+								void send();
+							}}
 						>
-					</form>
+							<textarea
+								bind:value={draft}
+								rows="2"
+								placeholder="Message…"
+								onkeydown={onKey}
+								disabled={!key || !!error || connState !== 'open'}
+							></textarea>
+							<button type="submit" disabled={!draft.trim() || !key || !!error || connState !== 'open'}
+								>Send</button
+							>
+						</form>
 
-					<details class="tools">
-						<summary>Export options & report</summary>
-						<label>
-							<input type="checkbox" bind:checked={passOnly} />
-							Passphrase-only export (import without session key)
-						</label>
-						<input type="password" bind:value={exportPass} placeholder="Optional passphrase" />
-						<button type="button" onclick={doExport}>Download export</button>
-						<hr />
-						<input type="text" bind:value={reportNote} placeholder="Report note (no content)" />
-						<button type="button" class="danger" onclick={reportLine}
-							>Report this {SECURE_LINE}</button
-						>
-					</details>
+						<details class="tools">
+							<summary>Export options & report</summary>
+							<label>
+								<input type="checkbox" bind:checked={passOnly} />
+								Passphrase-only export (import without session key)
+							</label>
+							<input type="password" bind:value={exportPass} placeholder="Optional passphrase" />
+							<button type="button" onclick={doExport}>Download export</button>
+							<hr />
+							<input type="text" bind:value={reportNote} placeholder="Report note (no content)" />
+							<button type="button" class="danger" onclick={reportLine}
+								>Report this {SECURE_LINE}</button
+							>
+						</details>
+					</div>
 				</div>
 			</div>
 		</div>
@@ -869,6 +983,10 @@
 
 	{#if chatsOpen}
 		<ChatListSheet open={chatsOpen} onClose={() => (chatsOpen = false)} />
+	{/if}
+	<AppSettings open={settingsOpen} onClose={() => (settingsOpen = false)} />
+	{#if shareRoom}
+		<ShareInviteModal room={shareRoom} onClose={() => (shareRoom = null)} />
 	{/if}
 </main>
 
@@ -1155,42 +1273,91 @@
 	header {
 		flex-shrink: 0;
 		display: flex;
-		flex-wrap: wrap;
-		align-items: flex-start;
-		gap: 0.75rem;
+		flex-direction: column;
+		align-items: stretch;
+		gap: 0.35rem;
+	}
+
+	.header-top {
+		display: flex;
+		align-items: center;
 		justify-content: space-between;
+		gap: 0.55rem;
+		min-height: 2.25rem;
 	}
 
 	.back {
 		font-family: var(--font-display);
 		font-weight: 800;
-		font-size: 1.35rem;
+		font-size: 1.05rem;
 		text-decoration: none;
 		color: var(--ink);
+		flex-shrink: 0;
+		line-height: 1;
 	}
 
 	.presence {
-		flex: 1;
-		min-width: 10rem;
+		min-width: 0;
 		display: flex;
-		flex-direction: column;
-		gap: 0.15rem;
+		align-items: baseline;
 	}
 
 	.presence-title {
-		font-size: 0.95rem;
+		font-size: 0.88rem;
 		font-weight: 600;
 		color: var(--muted);
+		line-height: 1.25;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
 	}
 
 	.presence.live .presence-title {
 		color: var(--accent);
 	}
 
-	.presence-hint {
-		font-size: 0.8rem;
-		color: var(--muted);
-		line-height: 1.35;
+	.wait-dots {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.2rem;
+		height: 0.85em;
+	}
+
+	.wait-dots span {
+		width: 0.28rem;
+		height: 0.28rem;
+		border-radius: 50%;
+		background: currentColor;
+		opacity: 0.35;
+		animation: wait-dot 1.2s ease-in-out infinite;
+	}
+
+	.wait-dots span:nth-child(2) {
+		animation-delay: 0.2s;
+	}
+
+	.wait-dots span:nth-child(3) {
+		animation-delay: 0.4s;
+	}
+
+	@keyframes wait-dot {
+		0%,
+		80%,
+		100% {
+			opacity: 0.3;
+			transform: translateY(0);
+		}
+		40% {
+			opacity: 1;
+			transform: translateY(-0.12rem);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.wait-dots span {
+			animation: none;
+			opacity: 0.7;
+		}
 	}
 
 	.conn-banner {
@@ -1294,15 +1461,24 @@
 
 	.actions {
 		display: flex;
-		gap: 0.4rem;
+		gap: 0.3rem;
 		align-items: center;
-		flex-wrap: wrap;
-		justify-content: flex-end;
+		flex-wrap: nowrap;
+		flex-shrink: 0;
 	}
 
 	.stat {
 		font-size: 0.8rem;
 		color: var(--muted);
+	}
+
+	.stat.icon-stat {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 2rem;
+		height: 2rem;
+		color: var(--accent);
 	}
 
 	button {
@@ -1316,9 +1492,14 @@
 	}
 
 	.icon-btn {
-		padding: 0.4rem;
+		padding: 0.35rem;
 		line-height: 0;
 		color: var(--muted);
+		width: 2rem;
+		height: 2rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
 	}
 
 	.icon-btn[aria-expanded='true'] {
@@ -1497,14 +1678,22 @@
 		flex-shrink: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
-		padding: 0 0 calc(0.85rem + env(safe-area-inset-bottom, 0px));
-		background: var(--bg0);
-		border: 1px solid var(--line);
-		border-top: none;
-		border-bottom: none;
-		border-radius: 0;
+		gap: 0;
+		padding: 0;
+		background: transparent;
+		border: none;
 		overflow: visible;
+	}
+
+	.dock-body {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		padding: 0.5rem 0.75rem calc(0.85rem + env(safe-area-inset-bottom, 0px));
+		background: var(--bg0);
+		border-left: 1px solid var(--line);
+		border-right: 1px solid var(--line);
+		border-top: 1px solid var(--line);
 	}
 
 	.chats-btn {
@@ -1529,6 +1718,8 @@
 		letter-spacing: 0.02em;
 		line-height: 1;
 		flex-shrink: 0;
+		position: relative;
+		z-index: 1;
 	}
 
 	.chats-btn:hover {
@@ -1538,6 +1729,11 @@
 	@media (min-width: 720px) {
 		.chats-btn {
 			display: none !important;
+		}
+
+		.dock-body {
+			border-top: 1px solid var(--line);
+			border-radius: 0.5rem 0.5rem 0 0;
 		}
 	}
 
@@ -1558,12 +1754,12 @@
 	.dock .tools {
 		margin-left: 0;
 		margin-right: 0;
-		padding-left: 0.75rem;
-		padding-right: 0.75rem;
+		padding-left: 0;
+		padding-right: 0;
 	}
 
 	.dock .composer {
-		padding-top: 0.35rem;
+		padding-top: 0;
 	}
 
 	article {
