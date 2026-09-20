@@ -172,6 +172,39 @@ func TestBufferWhenAlone(t *testing.T) {
 	}
 }
 
+func TestBufferByteCap(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cfg := testCfg(&now)
+	cfg.MaxBufferFrames = 32
+	cfg.MaxBufferBytes = 100
+	reg := bucket.NewRegistry(cfg)
+	j := reg.Join("b1", "tokA", "sidA", "1.1.1.1", "c1")
+	b := j.Bucket
+
+	big := make([]byte, 60)
+	if !reg.BufferIfAlone(b, 0, big, true) {
+		t.Fatal("expected first buffer")
+	}
+	if !reg.BufferIfAlone(b, 0, big, true) {
+		t.Fatal("expected second buffer")
+	}
+	// Third 60-byte frame should force dropping oldest so total stays ≤100.
+	if !reg.BufferIfAlone(b, 0, big, true) {
+		t.Fatal("expected third buffer")
+	}
+	frames := reg.DrainBuffer(b)
+	total := 0
+	for _, f := range frames {
+		total += len(f.Data)
+	}
+	if total > 100 {
+		t.Fatalf("buffer bytes %d exceed cap", total)
+	}
+	if len(frames) != 1 {
+		t.Fatalf("expected 1 frame after cap eviction, got %d", len(frames))
+	}
+}
+
 func TestBufferTTL(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	reg := bucket.NewRegistry(testCfg(&now))

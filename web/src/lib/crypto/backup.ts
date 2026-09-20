@@ -1,6 +1,15 @@
 /** Encrypted history export/import (HKDF backup key + optional passphrase). */
 
-import { base64UrlToBytes, bytesToBase64Url, exportKeyRaw, type PlainMessage } from './session';
+import {
+	base64ToBytes,
+	base64UrlToBytes,
+	bytesToBase64,
+	bytesToBase64Url,
+	exportKeyRaw,
+	type ImageMime,
+	type PlainMessage,
+	type ReplyRef
+} from './session';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -16,6 +25,119 @@ export type ExportFile = {
 	/** Present when a passphrase was used (PBKDF2 salt). */
 	pass_salt?: string;
 };
+
+function parseReplyTo(raw: unknown): ReplyRef | undefined {
+	if (!raw || typeof raw !== 'object') return undefined;
+	const r = raw as Record<string, unknown>;
+	if (typeof r.id !== 'string' || !r.id || typeof r.preview !== 'string') return undefined;
+	return { id: r.id, preview: r.preview };
+}
+
+/** JSON-safe message for export ciphertext (image bytes as standard base64). */
+type WireStoredMessage =
+	| (Extract<PlainMessage, { type: 'text' }> & { id: string; from: 'self' | 'peer' })
+	| {
+			v: 1;
+			ts: number;
+			type: 'image';
+			mime: ImageMime;
+			dataB64: string;
+			w?: number;
+			h?: number;
+			id: string;
+			from: 'self' | 'peer';
+			replyTo?: ReplyRef;
+	  };
+
+function toWire(msg: StoredMessage): WireStoredMessage {
+	if (msg.type === 'image') {
+		const w: WireStoredMessage = {
+			v: 1,
+			ts: msg.ts,
+			type: 'image',
+			mime: msg.mime,
+			dataB64: bytesToBase64(msg.data),
+			id: msg.id,
+			from: msg.from
+		};
+		if (typeof msg.w === 'number') w.w = msg.w;
+		if (typeof msg.h === 'number') w.h = msg.h;
+		if (msg.replyTo) w.replyTo = msg.replyTo;
+		return w;
+	}
+	const out: WireStoredMessage = {
+		v: 1,
+		ts: msg.ts,
+		type: 'text',
+		body: msg.body,
+		id: msg.id,
+		from: msg.from
+	};
+	if (msg.replyTo) out.replyTo = msg.replyTo;
+	return out;
+}
+
+function fromWire(raw: unknown): StoredMessage | null {
+	if (!raw || typeof raw !== 'object') return null;
+	const m = raw as Record<string, unknown>;
+	if (typeof m.id !== 'string' || (m.from !== 'self' && m.from !== 'peer')) return null;
+	const replyTo = parseReplyTo(m.replyTo);
+	if (m.type === 'image') {
+		if (typeof m.ts !== 'number') return null;
+		const mime = m.mime;
+		if (
+			mime !== 'image/jpeg' &&
+			mime !== 'image/png' &&
+			mime !== 'image/webp' &&
+			mime !== 'image/gif'
+		) {
+			return null;
+		}
+		const b64 = typeof m.dataB64 === 'string' ? m.dataB64 : '';
+		if (!b64) return null;
+		const msg: StoredMessage = {
+			v: 1,
+			ts: m.ts,
+			type: 'image',
+			mime,
+			data: base64ToBytes(b64),
+			id: m.id,
+			from: m.from
+		};
+		if (typeof m.w === 'number') msg.w = m.w;
+		if (typeof m.h === 'number') msg.h = m.h;
+		if (replyTo) msg.replyTo = replyTo;
+		return msg;
+	}
+	if (m.type === 'text' && typeof m.body === 'string' && typeof m.ts === 'number') {
+		const msg: StoredMessage = {
+			v: 1,
+			ts: m.ts,
+			type: 'text',
+			body: m.body,
+			id: m.id,
+			from: m.from
+		};
+		if (replyTo) msg.replyTo = replyTo;
+		return msg;
+	}
+	return null;
+}
+
+function serializeMessages(messages: StoredMessage[]): string {
+	return JSON.stringify({ messages: messages.map(toWire) });
+}
+
+function parseMessagesPayload(pt: ArrayBuffer): StoredMessage[] {
+	const parsed = JSON.parse(decoder.decode(pt)) as { messages?: unknown };
+	if (!Array.isArray(parsed.messages)) throw new Error('bad payload');
+	const out: StoredMessage[] = [];
+	for (const item of parsed.messages) {
+		const m = fromWire(item);
+		if (m) out.push(m);
+	}
+	return out;
+}
 
 function buf(u8: Uint8Array): Uint8Array<ArrayBuffer> {
 	const out = new Uint8Array(u8.byteLength);
@@ -86,7 +208,7 @@ export async function exportHistory(
 ): Promise<ExportFile> {
 	const { key, passSalt } = await deriveBackupKey(sessionKey, passphrase);
 	const nonce = crypto.getRandomValues(new Uint8Array(12));
-	const plaintext = encoder.encode(JSON.stringify({ messages }));
+	const plaintext = encoder.encode(serializeMessages(messages));
 	const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, plaintext);
 	const file: ExportFile = {
 		version: 1,
@@ -142,9 +264,7 @@ export async function importHistory(
 	const ct = buf(base64UrlToBytes(file.ciphertext));
 	try {
 		const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, ct);
-		const parsed = JSON.parse(decoder.decode(pt)) as { messages: StoredMessage[] };
-		if (!Array.isArray(parsed.messages)) throw new Error('bad payload');
-		return { bucketId: file.bucket_id, messages: parsed.messages };
+		return { bucketId: file.bucket_id, messages: parseMessagesPayload(pt) };
 	} catch {
 		throw new Error('decrypt failed — wrong key or passphrase');
 	}
@@ -171,7 +291,7 @@ export async function exportHistoryWithPassphraseOnly(
 		['encrypt']
 	);
 	const nonce = crypto.getRandomValues(new Uint8Array(12));
-	const plaintext = encoder.encode(JSON.stringify({ messages }));
+	const plaintext = encoder.encode(serializeMessages(messages));
 	const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, plaintext);
 	return {
 		version: 1,

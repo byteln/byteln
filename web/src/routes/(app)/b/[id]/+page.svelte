@@ -5,6 +5,7 @@
 	import ChatListSheet from '$lib/components/ChatListSheet.svelte';
 	import ChatListSidePanel from '$lib/components/ChatListSidePanel.svelte';
 	import DeviceSettings from '$lib/components/DeviceSettings.svelte';
+	import ImageBubble from '$lib/components/ImageBubble.svelte';
 	import ShareInviteModal from '$lib/components/ShareInviteModal.svelte';
 	import ShareQr from '$lib/components/ShareQr.svelte';
 	import {
@@ -19,7 +20,7 @@
 		takeCreatorPin,
 		type RoomFragment
 	} from '$lib/crypto/room';
-	import { importKeyRaw, randomToken } from '$lib/crypto/session';
+	import { importKeyRaw, randomToken, replyPreview, type ReplyRef } from '$lib/crypto/session';
 	import {
 		browserOffline,
 		connectionManager,
@@ -84,10 +85,22 @@
 	let rooms = $state<RoomRecord[]>([]);
 
 	let listEl = $state<HTMLElement | null>(null);
+	let fileInput = $state<HTMLInputElement | null>(null);
+	let composerTextarea = $state<HTMLTextAreaElement | null>(null);
+	let imageBusy = $state(false);
+	let imageError = $state('');
+	let replyTarget = $state<StoredMessage | null>(null);
+	let highlightId = $state<string | null>(null);
+	let composerDragOver = $state(false);
+	let dropFlash = $state(false);
+	let dropFlashTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const messages = $derived(($messagesByBucket[bucketId] ?? []) as StoredMessage[]);
 	const runtime = $derived($roomRuntimes[bucketId]);
 	const connState = $derived(runtime?.connState ?? 'connecting');
+	const composerCanSend = $derived(
+		!!draft.trim() && !!key && !error && connState === 'open' && !imageBusy
+	);
 	const connDetail = $derived(runtime?.connDetail ?? '');
 	const reconnectAttempt = $derived(runtime?.reconnectAttempt ?? 0);
 	const reconnectStalled = $derived(runtime?.reconnectStalled ?? false);
@@ -103,6 +116,11 @@
 	const hasOtherUnread = $derived(
 		rooms.some((r) => r.unread && r.bucketId !== bucketId)
 	);
+	const messageById = $derived.by(() => {
+		const map = new Map<string, StoredMessage>();
+		for (const msg of messages) map.set(msg.id, msg);
+		return map;
+	});
 
 	$effect(() => {
 		if (phase !== 'chat') return;
@@ -283,6 +301,16 @@
 		pinnedToBottom = true;
 		nickname = '';
 		editNickname = '';
+		imageBusy = false;
+		imageError = '';
+		replyTarget = null;
+		highlightId = null;
+		composerDragOver = false;
+		dropFlash = false;
+		if (dropFlashTimer) {
+			clearTimeout(dropFlashTimer);
+			dropFlashTimer = null;
+		}
 	}
 
 	async function bootstrapRoom(id: string, gen: number) {
@@ -429,13 +457,143 @@
 		shareRoom = rec;
 	}
 
+	function startReply(m: StoredMessage) {
+		replyTarget = m;
+	}
+
+	function clearReply() {
+		replyTarget = null;
+	}
+
+	function replyOpts(): { replyTo: ReplyRef } | undefined {
+		if (!replyTarget) return undefined;
+		return { replyTo: { id: replyTarget.id, preview: replyPreview(replyTarget) } };
+	}
+
+	async function jumpToMessage(id: string) {
+		await tick();
+		const el = listEl?.querySelector(`[data-msg-id="${CSS.escape(id)}"]`);
+		if (el instanceof HTMLElement) {
+			el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+			highlightId = id;
+			window.setTimeout(() => {
+				if (highlightId === id) highlightId = null;
+			}, 1400);
+		}
+	}
+
+	function resizeComposer() {
+		const el = composerTextarea;
+		if (!el) return;
+		el.style.height = 'auto';
+		const max = 8 * 1.4 * 16; // ~8 lines
+		el.style.height = `${Math.min(el.scrollHeight, max)}px`;
+	}
+
+	async function sendImageFile(file: File | Blob) {
+		if (!key || connState !== 'open' || imageBusy) return;
+		imageBusy = true;
+		imageError = '';
+		try {
+			const ok = await connectionManager.sendImage(bucketId, file, replyOpts());
+			if (!ok) {
+				imageError = 'Could not send image.';
+				return;
+			}
+			clearReply();
+			queueMicrotask(() => scrollToBottom(true));
+		} catch (e) {
+			imageError = e instanceof Error ? e.message : 'Could not send image.';
+		} finally {
+			imageBusy = false;
+		}
+	}
+
 	async function send() {
 		const body = draft.trim();
-		if (!body || !key || connState !== 'open') return;
-		const ok = await connectionManager.send(bucketId, body);
+		if (!body || !key || connState !== 'open' || imageBusy) return;
+		const ok = await connectionManager.send(bucketId, body, replyOpts());
 		if (!ok) return;
 		draft = '';
-		queueMicrotask(() => scrollToBottom(true));
+		clearReply();
+		queueMicrotask(() => {
+			resizeComposer();
+			scrollToBottom(true);
+		});
+	}
+
+	function onPickImage(e: Event) {
+		const input = e.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = '';
+		if (file) void sendImageFile(file);
+	}
+
+	function onPaste(e: ClipboardEvent) {
+		if (phase !== 'chat' || connState !== 'open') return;
+		const items = e.clipboardData?.items;
+		if (!items) return;
+		for (const item of items) {
+			if (item.type.startsWith('image/')) {
+				const file = item.getAsFile();
+				if (file) {
+					e.preventDefault();
+					void sendImageFile(file);
+				}
+				return;
+			}
+		}
+	}
+
+	function canAcceptDrop(e: DragEvent): boolean {
+		if (phase !== 'chat' || !key || !!error || connState !== 'open' || imageBusy) return false;
+		const types = e.dataTransfer?.types;
+		if (!types) return false;
+		return Array.from(types).includes('Files');
+	}
+
+	function onPageDragEnter(e: DragEvent) {
+		if (!canAcceptDrop(e)) return;
+		e.preventDefault();
+		composerDragOver = true;
+	}
+
+	function onPageDragOver(e: DragEvent) {
+		if (!canAcceptDrop(e)) return;
+		e.preventDefault();
+		if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+		composerDragOver = true;
+	}
+
+	function onPageDragLeave(e: DragEvent) {
+		const root = e.currentTarget as HTMLElement;
+		const related = e.relatedTarget as Node | null;
+		if (related && root.contains(related)) return;
+		composerDragOver = false;
+	}
+
+	function flashDrop() {
+		dropFlash = true;
+		if (dropFlashTimer) clearTimeout(dropFlashTimer);
+		dropFlashTimer = setTimeout(() => {
+			dropFlash = false;
+			dropFlashTimer = null;
+		}, 520);
+	}
+
+	function onPageDrop(e: DragEvent) {
+		e.preventDefault();
+		composerDragOver = false;
+		if (phase !== 'chat' || connState !== 'open' || imageBusy) return;
+		const file = e.dataTransfer?.files?.[0];
+		if (file && file.type.startsWith('image/')) {
+			flashDrop();
+			void sendImageFile(file);
+		}
+	}
+
+	function onDraftInput() {
+		resizeComposer();
 	}
 
 	function shareUrl(): string {
@@ -576,7 +734,15 @@
 
 <svelte:window onresize={onWindowResize} />
 
-<main class="chat">
+<main
+	class="chat"
+	class:drop-active={composerDragOver}
+	class:drop-flash={dropFlash}
+	ondragenter={onPageDragEnter}
+	ondragover={onPageDragOver}
+	ondragleave={onPageDragLeave}
+	ondrop={onPageDrop}
+>
 	{#if bucketFull}
 		<section class="blocked" role="alert">
 			<a href="/app" class="back">{APP_NAME}</a>
@@ -895,10 +1061,44 @@
 				<div class="list-wrap">
 					<div class="list" bind:this={listEl} onscroll={updateScrollPin}>
 						{#each messages as m (m.id)}
-							<article class:self={m.from === 'self'}>
+							<article
+								data-msg-id={m.id}
+								class:self={m.from === 'self'}
+								class:highlight={highlightId === m.id}
+							>
+								{#if m.replyTo}
+									{@const parent = messageById.get(m.replyTo.id)}
+									<button
+										type="button"
+										class="quote"
+										onclick={() => jumpToMessage(m.replyTo!.id)}
+									>
+										{#if parent?.type === 'image'}
+											<ImageBubble
+												mime={parent.mime}
+												data={parent.data}
+												w={parent.w}
+												h={parent.h}
+												thumb
+												alt=""
+											/>
+										{:else}
+											<span class="quote-text">{m.replyTo.preview}</span>
+										{/if}
+									</button>
+								{/if}
 								<span class="who">{m.from === 'self' ? 'You' : partnerLabelText}</span>
-								<p>{m.body}</p>
+								{#if m.type === 'image'}
+									<ImageBubble mime={m.mime} data={m.data} w={m.w} h={m.h} />
+								{:else}
+									<p>{m.body}</p>
+								{/if}
 								<time>{new Date(m.ts).toLocaleTimeString()}</time>
+								{#if key && !error && connState === 'open'}
+									<button type="button" class="reply-btn" onclick={() => startReply(m)}
+										>Reply</button
+									>
+								{/if}
 							</article>
 						{/each}
 					</div>
@@ -919,23 +1119,101 @@
 					</button>
 
 					<div class="dock-body">
+						{#if imageError}
+							<p class="err">{imageError}</p>
+						{/if}
+						{#if replyTarget}
+							<div class="reply-chip">
+								{#if replyTarget.type === 'image'}
+									<ImageBubble
+										mime={replyTarget.mime}
+										data={replyTarget.data}
+										w={replyTarget.w}
+										h={replyTarget.h}
+										thumb
+										alt=""
+									/>
+								{/if}
+								<div class="reply-chip-body">
+									<span class="reply-chip-label">Replying to</span>
+									<span class="reply-chip-preview">
+										{replyTarget.type === 'image' ? 'Photo' : replyPreview(replyTarget)}
+									</span>
+								</div>
+								<button
+									type="button"
+									class="reply-chip-dismiss"
+									aria-label="Cancel reply"
+									onclick={clearReply}>×</button
+								>
+							</div>
+						{/if}
 						<form
 							class="composer"
+							class:drag-over={composerDragOver}
 							onsubmit={(e) => {
 								e.preventDefault();
 								void send();
 							}}
 						>
-							<textarea
-								bind:value={draft}
-								rows="2"
-								placeholder="Message…"
-								onkeydown={onKey}
-								disabled={!key || !!error || connState !== 'open'}
-							></textarea>
-							<button type="submit" disabled={!draft.trim() || !key || !!error || connState !== 'open'}
-								>Send</button
-							>
+							<input
+								bind:this={fileInput}
+								type="file"
+								accept="image/jpeg,image/png,image/webp,image/gif,image/*"
+								class="file-hidden"
+								onchange={onPickImage}
+							/>
+							<div class="composer-row">
+								<button
+									type="button"
+									class="attach-btn"
+									aria-label="Attach image"
+									title="Attach image"
+									disabled={!key || !!error || connState !== 'open' || imageBusy}
+									onclick={() => fileInput?.click()}
+								>
+									<svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+										<path
+											d="M21.4 11.6l-8.5 8.5a5.5 5.5 0 01-7.8-7.8l8.5-8.5a3.5 3.5 0 015 5l-8.2 8.2a1.5 1.5 0 01-2.1-2.1l7.1-7.1"
+											stroke="currentColor"
+											stroke-width="1.75"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										/>
+									</svg>
+								</button>
+								<textarea
+									bind:this={composerTextarea}
+									bind:value={draft}
+									rows="1"
+									placeholder="Message…"
+									onkeydown={onKey}
+									onpaste={onPaste}
+									oninput={onDraftInput}
+									disabled={!key || !!error || connState !== 'open'}
+								></textarea>
+								<button
+									type="submit"
+									class="send-btn"
+									class:ready={composerCanSend || imageBusy}
+									aria-label={imageBusy ? 'Sending' : 'Send'}
+									disabled={!composerCanSend && !imageBusy}
+								>
+									{#if imageBusy}
+										<span class="send-spinner" aria-hidden="true"></span>
+									{:else}
+										<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+											<path
+												d="M4.5 12h11M12.5 6.5L18 12l-5.5 5.5"
+												stroke="currentColor"
+												stroke-width="2"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											/>
+										</svg>
+									{/if}
+								</button>
+							</div>
 						</form>
 
 						<details class="tools">
@@ -988,6 +1266,23 @@
 	{#if shareRoom}
 		<ShareInviteModal room={shareRoom} onClose={() => (shareRoom = null)} />
 	{/if}
+
+	{#if composerDragOver}
+		<div class="drop-overlay" aria-hidden="true">
+			<div class="drop-card">
+				<svg width="36" height="36" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+					<path
+						d="M12 3v10m0 0l-3.5-3.5M12 13l3.5-3.5M5 19h14"
+						stroke="currentColor"
+						stroke-width="1.75"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					/>
+				</svg>
+				<p>Drop image to send</p>
+			</div>
+		</div>
+	{/if}
 </main>
 
 <style>
@@ -1002,6 +1297,85 @@
 		padding: 1rem 1rem 0;
 		gap: 0.75rem;
 		overflow: hidden;
+	}
+
+	.chat.drop-active {
+		outline: 2px solid rgba(61, 220, 176, 0.45);
+		outline-offset: -2px;
+	}
+
+	.drop-overlay {
+		position: absolute;
+		inset: 0;
+		z-index: 40;
+		display: grid;
+		place-items: center;
+		padding: 1.5rem;
+		pointer-events: none;
+		background:
+			radial-gradient(ellipse at center, rgba(61, 220, 176, 0.14), transparent 65%),
+			rgba(10, 12, 14, 0.55);
+		animation: drop-in 0.2s ease both;
+	}
+
+	.drop-card {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.65rem;
+		padding: 1.35rem 1.75rem;
+		border-radius: 1.25rem;
+		border: 1.5px dashed rgba(61, 220, 176, 0.65);
+		background: rgba(18, 26, 23, 0.92);
+		color: var(--accent);
+		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+		animation: drop-pulse 1.1s ease-in-out infinite;
+	}
+
+	.drop-card p {
+		margin: 0;
+		font-size: 0.95rem;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		color: var(--ink);
+	}
+
+	.chat.drop-flash::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		z-index: 39;
+		pointer-events: none;
+		background: radial-gradient(circle at center, rgba(61, 220, 176, 0.28), transparent 55%);
+		animation: drop-flash 0.52s ease-out both;
+	}
+
+	@keyframes drop-in {
+		from {
+			opacity: 0;
+		}
+		to {
+			opacity: 1;
+		}
+	}
+
+	@keyframes drop-pulse {
+		0%,
+		100% {
+			transform: scale(1);
+		}
+		50% {
+			transform: scale(1.03);
+		}
+	}
+
+	@keyframes drop-flash {
+		0% {
+			opacity: 0.9;
+		}
+		100% {
+			opacity: 0;
+		}
 	}
 
 	@media (min-width: 720px) {
@@ -1678,52 +2052,77 @@
 		flex-shrink: 0;
 		display: flex;
 		flex-direction: column;
+		align-items: stretch;
 		gap: 0;
 		padding: 0;
 		background: transparent;
 		border: none;
 		overflow: visible;
+		/* Break out of .chat horizontal padding → full page width */
+		margin-left: -1rem;
+		margin-right: -1rem;
+		width: calc(100% + 2rem);
+		position: relative;
+	}
+
+	@media (min-width: 720px) {
+		.dock {
+			margin-left: -1.25rem;
+			margin-right: -1.25rem;
+			width: calc(100% + 2.5rem);
+		}
 	}
 
 	.dock-body {
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
-		padding: 0.5rem 0.75rem calc(0.85rem + env(safe-area-inset-bottom, 0px));
+		gap: 0.45rem;
+		padding: 0.45rem 1.5rem calc(0.75rem + env(safe-area-inset-bottom, 0px));
 		background: var(--bg0);
-		border-left: 1px solid var(--line);
-		border-right: 1px solid var(--line);
+		border: none;
 		border-top: 1px solid var(--line);
 	}
 
+	/* Tab attached to the dock — sits on the separator line, not a separate band */
 	.chats-btn {
 		font: inherit;
 		cursor: pointer;
-		display: flex;
+		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		gap: 0.45rem;
-		width: 100%;
-		margin: 0;
-		padding: 0.35rem 1rem 0;
-		border: none;
-		background: var(--accent);
-		color: black;
-		/* Upside moon: full height at center, ~0 at both edges */
-		height: 2rem;
-		border-radius: 0;
-		clip-path: ellipse(50% 100% at 50% 100%);
-		font-size: 0.82rem;
-		font-weight: 700;
-		letter-spacing: 0.02em;
+		gap: 0.4rem;
+		align-self: center;
+		width: auto;
+		min-width: 9.5rem;
+		max-width: calc(100% - 2rem);
+		margin: 0 0 -1px;
+		padding: 0.4rem 1.1rem 0.45rem;
+		border: 1px solid var(--line);
+		border-bottom-color: var(--bg0);
+		border-radius: 0.65rem 0.65rem 0 0;
+		background: var(--bg0);
+		color: var(--muted);
+		height: auto;
+		min-height: 0;
+		font-size: 0.72rem;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
 		line-height: 1;
 		flex-shrink: 0;
 		position: relative;
-		z-index: 1;
+		z-index: 2;
+		transition:
+			color 0.15s ease,
+			border-color 0.15s ease;
 	}
 
-	.chats-btn:hover {
-		filter: brightness(1.05);
+	.chats-btn:hover,
+	.chats-btn:focus-visible {
+		color: var(--accent);
+		border-color: rgba(61, 220, 176, 0.45);
+		border-bottom-color: var(--bg0);
+		outline: none;
 	}
 
 	@media (min-width: 720px) {
@@ -1732,21 +2131,21 @@
 		}
 
 		.dock-body {
-			border-top: 1px solid var(--line);
-			border-radius: 0.5rem 0.5rem 0 0;
+			padding-top: 0.55rem;
 		}
 	}
 
 	.chats-label {
 		text-align: center;
-		padding-bottom: 0.15rem;
+		padding: 0;
 	}
 
 	.chats-unread {
-		width: 0.45rem;
-		height: 0.45rem;
+		width: 0.4rem;
+		height: 0.4rem;
 		border-radius: 50%;
-		background: black;
+		background: var(--accent);
+		box-shadow: 0 0 0 2px rgba(61, 220, 176, 0.2);
 		flex-shrink: 0;
 	}
 
@@ -1759,7 +2158,7 @@
 	}
 
 	.dock .composer {
-		padding-top: 0;
+		padding: 0;
 	}
 
 	article {
@@ -1777,6 +2176,105 @@
 		border-radius: 0.5rem 0.5rem 0.15rem 0.5rem;
 		background: rgba(61, 220, 176, 0.12);
 		border-color: rgba(61, 220, 176, 0.35);
+	}
+
+	article.highlight {
+		border-color: var(--accent);
+		box-shadow: 0 0 0 1px rgba(61, 220, 176, 0.35);
+	}
+
+	.quote {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		width: 100%;
+		margin: 0 0 0.4rem;
+		padding: 0.35rem 0.5rem;
+		border: none;
+		border-left: 2px solid var(--accent);
+		border-radius: 0.2rem;
+		background: rgba(255, 255, 255, 0.04);
+		color: var(--muted);
+		font: inherit;
+		font-size: 0.78rem;
+		text-align: left;
+		cursor: pointer;
+		overflow: hidden;
+	}
+
+	.quote-text {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	article.self .quote {
+		text-align: left;
+	}
+
+	.reply-btn {
+		display: inline-block;
+		margin-top: 0.25rem;
+		padding: 0;
+		border: none;
+		background: none;
+		color: var(--muted);
+		font: inherit;
+		font-size: 0.7rem;
+		cursor: pointer;
+	}
+
+	.reply-btn:hover {
+		color: var(--accent);
+	}
+
+	.reply-chip {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		margin-bottom: 0.15rem;
+		padding: 0.4rem 0.55rem 0.4rem 0.65rem;
+		border: 1px solid var(--line);
+		border-left: 2px solid var(--accent);
+		border-radius: 0.75rem;
+		background: rgba(18, 26, 23, 0.55);
+		animation: stage-in 0.18s ease both;
+	}
+
+	.reply-chip-body {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.05rem;
+	}
+
+	.reply-chip-label {
+		font-size: 0.68rem;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--accent);
+	}
+
+	.reply-chip-preview {
+		font-size: 0.8rem;
+		color: var(--muted);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.reply-chip-dismiss {
+		flex-shrink: 0;
+		padding: 0.15rem 0.4rem;
+		border: none;
+		background: none;
+		color: var(--muted);
+		font-size: 1.1rem;
+		line-height: 1;
+		cursor: pointer;
 	}
 
 	article p {
@@ -1818,35 +2316,150 @@
 		}
 	}
 
+	@keyframes stage-in {
+		from {
+			opacity: 0;
+			transform: scale(0.97) translateY(4px);
+		}
+		to {
+			opacity: 1;
+			transform: none;
+		}
+	}
+
 	.composer {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		padding: 0;
+		border: none;
+		border-radius: 0;
+		background: transparent;
+		transition: background 0.15s ease;
+	}
+
+	.composer.drag-over {
+		background: rgba(61, 220, 176, 0.08);
+	}
+
+	.composer-row {
 		display: grid;
-		grid-template-columns: 1fr auto;
-		gap: 0.5rem;
+		grid-template-columns: auto 1fr auto;
+		gap: 0.25rem;
 		align-items: end;
 	}
 
-	textarea {
-		font: inherit;
-		resize: vertical;
-		min-height: 3rem;
-		padding: 0.7rem 0.85rem;
-		border-radius: 0.35rem;
-		border: 1px solid var(--line);
-		background: rgba(18, 26, 23, 0.8);
-		color: var(--ink);
+	.file-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		opacity: 0;
+		pointer-events: none;
 	}
 
-	.composer button[type='submit'] {
+	.attach-btn {
+		display: grid;
+		place-items: center;
+		width: 2.5rem;
+		height: 2.5rem;
+		padding: 0;
+		border: none;
+		border-radius: 999px;
+		background: transparent;
+		color: var(--muted);
+		cursor: pointer;
+		align-self: end;
+		transition: color 0.15s ease, background 0.15s ease;
+	}
+
+	.attach-btn:hover:not(:disabled) {
+		color: var(--accent);
+		background: rgba(61, 220, 176, 0.08);
+	}
+
+	.attach-btn:disabled {
+		opacity: 0.45;
+		cursor: default;
+	}
+
+	.composer textarea {
+		font: inherit;
+		resize: none;
+		min-height: 2.5rem;
+		max-height: 11.2rem;
+		padding: 0.65rem 0.35rem;
+		border: none;
+		border-radius: 0;
+		background: transparent;
+		color: var(--ink);
+		line-height: 1.4;
+		overflow-y: auto;
+		field-sizing: content;
+	}
+
+	.composer textarea:focus {
+		outline: none;
+	}
+
+	.composer textarea:disabled {
+		opacity: 0.55;
+	}
+
+	.send-btn {
+		display: grid;
+		place-items: center;
+		width: 2.5rem;
+		height: 2.5rem;
+		padding: 0;
+		border: none;
+		border-radius: 999px;
+		background: rgba(61, 220, 176, 0.18);
+		color: var(--accent);
+		cursor: pointer;
+		align-self: end;
+		opacity: 0.55;
+		transform: scale(0.96);
+		transition:
+			opacity 0.15s ease,
+			transform 0.15s ease,
+			background 0.15s ease,
+			color 0.15s ease;
+	}
+
+	.send-btn.ready {
+		opacity: 1;
+		transform: scale(1);
 		background: var(--accent);
 		color: #06110d;
-		border: none;
-		font-weight: 600;
-		padding: 0.75rem 1rem;
+	}
+
+	.send-btn:disabled {
+		cursor: default;
+	}
+
+	.send-btn.ready:not(:disabled):hover {
+		filter: brightness(1.05);
+	}
+
+	.send-spinner {
+		width: 1rem;
+		height: 1rem;
+		border: 2px solid rgba(6, 17, 13, 0.25);
+		border-top-color: #06110d;
+		border-radius: 50%;
+		animation: spin 0.7s linear infinite;
+	}
+
+	@keyframes spin {
+		to {
+			transform: rotate(360deg);
+		}
 	}
 
 	.tools {
 		color: var(--muted);
-		font-size: 0.9rem;
+		font-size: 0.85rem;
+		opacity: 0.85;
 	}
 
 	.tools summary {

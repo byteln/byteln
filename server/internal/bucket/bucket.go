@@ -34,6 +34,7 @@ type Config struct {
 	BufferTTL       time.Duration
 	ReclaimTTL      time.Duration
 	MaxBufferFrames int
+	MaxBufferBytes  int
 	Now             func() time.Time
 }
 
@@ -60,6 +61,9 @@ func NewRegistry(cfg Config) *Registry {
 	}
 	if cfg.MaxBufferFrames <= 0 {
 		cfg.MaxBufferFrames = 32
+	}
+	if cfg.MaxBufferBytes <= 0 {
+		cfg.MaxBufferBytes = 16 << 20
 	}
 	return &Registry{cfg: cfg, m: make(map[string]*Bucket)}
 }
@@ -303,9 +307,15 @@ func (r *Registry) BufferIfAlone(b *Bucket, fromSlot int, data []byte, binary bo
 	}
 	now := r.cfg.Now()
 	r.pruneBufferLocked(b, now)
-	if len(b.Buffer) >= r.cfg.MaxBufferFrames {
-		// Drop oldest.
+	for len(b.Buffer) >= r.cfg.MaxBufferFrames || bufferBytes(b)+len(data) > r.cfg.MaxBufferBytes {
+		if len(b.Buffer) == 0 {
+			break
+		}
 		b.Buffer = b.Buffer[1:]
+	}
+	if len(data) > r.cfg.MaxBufferBytes {
+		// Single frame exceeds byte cap — do not buffer.
+		return true
 	}
 	cp := make([]byte, len(data))
 	copy(cp, data)
@@ -315,6 +325,14 @@ func (r *Registry) BufferIfAlone(b *Bucket, fromSlot int, data []byte, binary bo
 		ExpiresAt: now.Add(r.cfg.BufferTTL),
 	})
 	return true
+}
+
+func bufferBytes(b *Bucket) int {
+	n := 0
+	for _, f := range b.Buffer {
+		n += len(f.Data)
+	}
+	return n
 }
 
 func (r *Registry) DrainBuffer(b *Bucket) []BufferedFrame {

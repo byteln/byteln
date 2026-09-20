@@ -49,10 +49,12 @@ type Peer struct {
 	creatorIP string
 	server    *Server
 
-	sendCh  chan outbound
-	writeMu sync.Mutex
-	writing atomic.Bool
-	closed  atomic.Bool
+	sendCh    chan outbound
+	writeMu   sync.Mutex
+	writing   atomic.Bool
+	reading   atomic.Bool
+	readAgain atomic.Bool
+	closed    atomic.Bool
 }
 
 type outbound struct {
@@ -73,6 +75,7 @@ func New(cfg config.Config) (*Server, error) {
 			BufferTTL:       cfg.BufferTTL,
 			ReclaimTTL:      cfg.ReclaimTTL,
 			MaxBufferFrames: cfg.MaxBufferFrames,
+			MaxBufferBytes:  cfg.MaxBufferBytes,
 		}),
 		limit:   ratelimit.New(cfg.CreatePerMinPerIP, cfg.MaxBucketsPerIP),
 		workers: NewWorker(cfg.WorkerPoolSize),
@@ -316,60 +319,109 @@ func (s *Server) readPeer(p *Peer) {
 	if p.closed.Load() {
 		return
 	}
-	_ = p.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	// bufio.Reader on the conn is not concurrency-safe. Edge-triggered
+	// EventRead can fire again while a large frame (e.g. image) is still
+	// being drained — serialize and re-run if a poll was skipped.
+	if !p.reading.CompareAndSwap(false, true) {
+		p.readAgain.Store(true)
+		return
+	}
+	defer p.reading.Store(false)
+
 	for {
-		data, op, err := wsutil.ReadClientData(p.conn)
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		if p.closed.Load() {
+			return
+		}
+		p.readAgain.Store(false)
+
+		idle := false
+		for {
+			data, op, err := s.readClientFrame(p.conn)
+			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					idle = true
+					break
+				}
+				if err == io.EOF || strings.Contains(err.Error(), "closed") {
+					s.dropPeer(p, p.creatorIP)
+					return
+				}
 				return
 			}
-			if err == io.EOF || strings.Contains(err.Error(), "closed") {
+			if op == ws.OpClose {
 				s.dropPeer(p, p.creatorIP)
 				return
 			}
-			return
-		}
-		if op == ws.OpClose {
-			s.dropPeer(p, p.creatorIP)
-			return
-		}
-		if op == ws.OpPing {
-			if b := s.reg.Get(p.bucket); b != nil {
-				b.Touch()
-			}
-			p.Enqueue(data, ws.OpPong)
-			continue
-		}
-		if op == ws.OpText {
-			var ctrl protocol.Control
-			if json.Unmarshal(data, &ctrl) == nil && ctrl.Type == protocol.CtrlPing {
+			if op == ws.OpPing {
 				if b := s.reg.Get(p.bucket); b != nil {
 					b.Touch()
 				}
-				s.sendControl(p, protocol.Control{Type: protocol.CtrlPong})
+				p.Enqueue(data, ws.OpPong)
 				continue
 			}
+			if op == ws.OpText {
+				var ctrl protocol.Control
+				if json.Unmarshal(data, &ctrl) == nil && ctrl.Type == protocol.CtrlPing {
+					if b := s.reg.Get(p.bucket); b != nil {
+						b.Touch()
+					}
+					s.sendControl(p, protocol.Control{Type: protocol.CtrlPong})
+					continue
+				}
+			}
+			if op != ws.OpBinary && op != ws.OpText {
+				continue
+			}
+			if len(data) > s.cfg.MaxFrameBytes {
+				continue
+			}
+			b := s.reg.Get(p.bucket)
+			if b == nil {
+				s.dropPeer(p, p.creatorIP)
+				return
+			}
+			b.Touch()
+			if s.reg.BufferIfAlone(b, p.slot, data, op == ws.OpBinary) {
+				continue
+			}
+			other := b.OtherConn(p.slot)
+			if opPeer, ok := other.(*Peer); ok {
+				opPeer.Enqueue(data, op)
+				s.sendControl(p, protocol.Control{Type: protocol.CtrlPeerJoin})
+			}
 		}
-		if op != ws.OpBinary && op != ws.OpText {
-			continue
-		}
-		if len(data) > s.cfg.MaxFrameBytes {
-			continue
-		}
-		b := s.reg.Get(p.bucket)
-		if b == nil {
-			s.dropPeer(p, p.creatorIP)
+
+		if !idle || !p.readAgain.Load() {
 			return
 		}
-		b.Touch()
-		if s.reg.BufferIfAlone(b, p.slot, data, op == ws.OpBinary) {
+	}
+}
+
+// readClientFrame reads one application data frame. Short idle deadline for
+// the header; longer deadline once a payload is in flight (images up to MaxFrameBytes).
+func (s *Server) readClientFrame(conn net.Conn) ([]byte, ws.OpCode, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	controlHandler := wsutil.ControlFrameHandler(conn, ws.StateServerSide)
+	rd := wsutil.Reader{
+		Source:         conn,
+		State:          ws.StateServerSide,
+		CheckUTF8:      true,
+		OnIntermediate: controlHandler,
+	}
+	for {
+		hdr, err := rd.NextFrame()
+		if err != nil {
+			return nil, 0, err
+		}
+		if hdr.OpCode.IsControl() {
+			if err := controlHandler(hdr, &rd); err != nil {
+				return nil, 0, err
+			}
 			continue
 		}
-		other := b.OtherConn(p.slot)
-		if opPeer, ok := other.(*Peer); ok {
-			opPeer.Enqueue(data, op)
-			s.sendControl(p, protocol.Control{Type: protocol.CtrlPeerJoin})
-		}
+		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		payload, err := io.ReadAll(&rd)
+		return payload, hdr.OpCode, err
 	}
 }
 

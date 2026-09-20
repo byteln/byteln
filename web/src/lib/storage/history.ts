@@ -54,6 +54,60 @@ function openDb(): Promise<IDBDatabase> {
 
 type Row = StoredMessage & { pk: string; bucketId: string };
 
+function normalizeStored(row: Row): StoredMessage {
+	const { id, from, ts, type } = row;
+	const replyRaw = (row as { replyTo?: unknown }).replyTo;
+	let replyTo: StoredMessage['replyTo'];
+	if (replyRaw && typeof replyRaw === 'object') {
+		const r = replyRaw as Record<string, unknown>;
+		if (typeof r.id === 'string' && r.id && typeof r.preview === 'string') {
+			replyTo = { id: r.id, preview: r.preview };
+		}
+	}
+	if (type === 'image') {
+		const raw = (row as { data?: unknown }).data;
+		let data: Uint8Array;
+		if (raw instanceof Uint8Array) {
+			data = raw;
+		} else if (raw instanceof ArrayBuffer) {
+			data = new Uint8Array(raw);
+		} else if (ArrayBuffer.isView(raw)) {
+			data = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+		} else {
+			data = new Uint8Array();
+		}
+		const mime = (row as { mime?: string }).mime;
+		const msg: StoredMessage = {
+			id,
+			from,
+			v: 1,
+			ts,
+			type: 'image',
+			mime:
+				mime === 'image/png' || mime === 'image/webp' || mime === 'image/gif'
+					? mime
+					: 'image/jpeg',
+			data
+		};
+		const w = (row as { w?: number }).w;
+		const h = (row as { h?: number }).h;
+		if (typeof w === 'number') msg.w = w;
+		if (typeof h === 'number') msg.h = h;
+		if (replyTo) msg.replyTo = replyTo;
+		return msg;
+	}
+	const msg: StoredMessage = {
+		id,
+		from,
+		v: 1,
+		ts,
+		type: 'text',
+		body: typeof (row as { body?: unknown }).body === 'string' ? (row as { body: string }).body : ''
+	};
+	if (replyTo) msg.replyTo = replyTo;
+	return msg;
+}
+
 export function defaultNickname(bucketId: string): string {
 	return defaultLineNickname(bucketId);
 }
@@ -66,7 +120,7 @@ export async function listMessages(bucketId: string): Promise<StoredMessage[]> {
 		const req = idx.getAll(bucketId);
 		req.onsuccess = () => {
 			const rows = (req.result as Row[]).sort((a, b) => a.ts - b.ts);
-			resolve(rows.map(({ id, from, v, ts, type, body }) => ({ id, from, v, ts, type, body })));
+			resolve(rows.map(normalizeStored));
 		};
 		req.onerror = () => reject(req.error);
 	});

@@ -24,7 +24,13 @@
 	let loaded = $state(false);
 	let editingRoom = $state<RoomRecord | null>(null);
 	let editPartnerName = $state('');
-	let menuPos = $state<{ bucketId: string; top: number; left: number } | null>(null);
+	let menuPos = $state<{
+		bucketId: string;
+		anchorTop: number;
+		anchorBottom: number;
+		anchorLeft: number;
+		anchorRight: number;
+	} | null>(null);
 	let forgetRoom = $state<RoomRecord | null>(null);
 	let shareRoom = $state<RoomRecord | null>(null);
 
@@ -82,30 +88,69 @@
 
 	function openMenu(bucketId: string, e: MouseEvent) {
 		e.stopPropagation();
+		e.preventDefault();
 		const btn = e.currentTarget as HTMLElement;
 		const rect = btn.getBoundingClientRect();
-		const menuWidthPx = 13 * 16;
-		const menuHeightPx = 160;
-		const left = Math.max(8, Math.min(rect.right - menuWidthPx, window.innerWidth - menuWidthPx - 8));
-		const spaceBelow = window.innerHeight - rect.bottom;
-		const top =
-			spaceBelow < menuHeightPx + 8
-				? Math.max(8, rect.top - menuHeightPx - 4)
-				: rect.bottom + 4;
-		menuPos = { bucketId, top, left };
+		menuPos = {
+			bucketId,
+			anchorTop: rect.top,
+			anchorBottom: rect.bottom,
+			anchorLeft: rect.left,
+			anchorRight: rect.right
+		};
 	}
 
 	function closeMenu() {
 		menuPos = null;
 	}
 
-	/** Move fixed menus to document.body so sheet/side-panel overflow does not clip them. */
-	function portal(node: HTMLElement) {
+	/** Portal to body and pin to the ⋮ button using the menu's real size. */
+	function attachMenu(node: HTMLElement) {
 		document.body.appendChild(node);
-		return {
-			destroy() {
-				node.remove();
+
+		const place = () => {
+			const anchor = menuPos;
+			if (!anchor) return;
+			const pad = 8;
+			const gap = 4;
+			const { width, height } = node.getBoundingClientRect();
+
+			let left = anchor.anchorRight - width;
+			left = Math.max(pad, Math.min(left, window.innerWidth - width - pad));
+
+			let top = anchor.anchorBottom + gap;
+			if (top + height + pad > window.innerHeight) {
+				top = anchor.anchorTop - height - gap;
 			}
+			top = Math.max(pad, Math.min(top, window.innerHeight - height - pad));
+
+			node.style.top = `${Math.round(top)}px`;
+			node.style.left = `${Math.round(left)}px`;
+			node.style.visibility = 'visible';
+		};
+
+		node.style.visibility = 'hidden';
+		place();
+		const raf = requestAnimationFrame(place);
+
+		const dismiss = (e: Event) => {
+			if (e.target instanceof Node && node.contains(e.target)) return;
+			closeMenu();
+		};
+		// Next tick so the opening click does not immediately close the menu.
+		const bindId = window.setTimeout(() => {
+			window.addEventListener('pointerdown', dismiss, true);
+			window.addEventListener('resize', dismiss);
+			window.addEventListener('scroll', dismiss, true);
+		}, 0);
+
+		return () => {
+			cancelAnimationFrame(raf);
+			window.clearTimeout(bindId);
+			window.removeEventListener('pointerdown', dismiss, true);
+			window.removeEventListener('resize', dismiss);
+			window.removeEventListener('scroll', dismiss, true);
+			node.remove();
 		};
 	}
 
@@ -238,13 +283,12 @@
 {#if menuPos && menuRoom}
 	<div
 		class="menu-portal"
-		style:top="{menuPos.top}px"
-		style:left="{menuPos.left}px"
 		role="menu"
 		tabindex="-1"
-		use:portal
+		{@attach attachMenu}
 		onclick={(e) => e.stopPropagation()}
 		onkeydown={(e) => e.stopPropagation()}
+		onpointerdown={(e) => e.stopPropagation()}
 	>
 		<button type="button" role="menuitem" onclick={() => startRename(menuRoom)}>Rename partner</button>
 		{#if menuRoom.isCreator && !menuRoom.legacy}
@@ -501,6 +545,8 @@
 
 	.menu-portal {
 		position: fixed;
+		top: 0;
+		left: 0;
 		z-index: 400;
 		min-width: 11.5rem;
 		background: var(--bg1);
@@ -511,6 +557,7 @@
 		flex-direction: column;
 		gap: 0.15rem;
 		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+		visibility: hidden;
 	}
 
 	.menu-portal button {

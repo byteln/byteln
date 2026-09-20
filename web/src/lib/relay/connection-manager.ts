@@ -23,9 +23,12 @@ import {
 	decryptMessage,
 	encryptMessage,
 	importKeyRaw,
+	messagePreview,
 	randomToken,
-	type PlainMessage
+	type PlainMessage,
+	type ReplyRef
 } from '$lib/crypto/session';
+import { prepareImage } from '$lib/media/image';
 import {
 	notifyPartnerJoined,
 	notifyPartnerMessage
@@ -648,13 +651,14 @@ class ConnectionManagerImpl {
 				const plain = await decryptMessage(r.key, buf);
 				const stored: StoredMessage = {
 					...plain,
-					id: crypto.randomUUID(),
+					id: plain.id ?? crypto.randomUUID(),
 					from: 'peer'
 				};
 				const msgs = [...(get(messagesByBucket)[bucketId] ?? []), stored];
 				this.syncMessages(bucketId, msgs);
 				await addMessage(bucketId, stored);
-				await touchRoom(bucketId, plain.body);
+				const preview = messagePreview(plain);
+				await touchRoom(bucketId, preview);
 
 				const active = get(activeBucketId);
 				const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
@@ -663,7 +667,7 @@ class ConnectionManagerImpl {
 					bumpRooms();
 					const rec = await getRoom(bucketId);
 					notifyPartnerMessage({
-						body: plain.body,
+						body: preview,
 						bucketId,
 						nickname: partnerLabel(rec),
 						onClick: () => {
@@ -876,18 +880,56 @@ class ConnectionManagerImpl {
 		}
 	}
 
-	async send(bucketId: string, body: string): Promise<boolean> {
+	async send(
+		bucketId: string,
+		body: string,
+		opts?: { replyTo?: ReplyRef }
+	): Promise<boolean> {
 		const room = this.rooms.get(bucketId);
 		if (!room?.client?.connected) return false;
 
-		const plain: PlainMessage = { v: 1, ts: Date.now(), type: 'text', body };
+		const id = crypto.randomUUID();
+		const plain: PlainMessage = { v: 1, ts: Date.now(), type: 'text', body, id };
+		if (opts?.replyTo) plain.replyTo = opts.replyTo;
 		const buf = await encryptMessage(room.key, plain);
 		room.client.sendBinary(buf);
-		const stored: StoredMessage = { ...plain, id: crypto.randomUUID(), from: 'self' };
+		const stored: StoredMessage = { ...plain, id, from: 'self' };
 		const msgs = [...(get(messagesByBucket)[bucketId] ?? []), stored];
 		this.syncMessages(bucketId, msgs);
 		await addMessage(bucketId, stored);
 		await touchRoom(bucketId, body);
+		bumpRooms();
+		return true;
+	}
+
+	async sendImage(
+		bucketId: string,
+		file: Blob,
+		opts?: { replyTo?: ReplyRef }
+	): Promise<boolean> {
+		const room = this.rooms.get(bucketId);
+		if (!room?.client?.connected) return false;
+
+		const prepared = await prepareImage(file);
+		const id = crypto.randomUUID();
+		const plain: PlainMessage = {
+			v: 1,
+			ts: Date.now(),
+			type: 'image',
+			mime: prepared.mime,
+			data: prepared.data,
+			w: prepared.w,
+			h: prepared.h,
+			id
+		};
+		if (opts?.replyTo) plain.replyTo = opts.replyTo;
+		const buf = await encryptMessage(room.key, plain);
+		room.client.sendBinary(buf);
+		const stored: StoredMessage = { ...plain, id, from: 'self' };
+		const msgs = [...(get(messagesByBucket)[bucketId] ?? []), stored];
+		this.syncMessages(bucketId, msgs);
+		await addMessage(bucketId, stored);
+		await touchRoom(bucketId, messagePreview(plain));
 		bumpRooms();
 		return true;
 	}

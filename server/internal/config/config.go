@@ -18,6 +18,7 @@ type Config struct {
 	AcceptQueueSize   int
 	MaxFrameBytes     int
 	MaxBufferFrames   int
+	MaxBufferBytes    int
 
 	DirectoryURL   string
 	CORSOrigins    []string
@@ -35,8 +36,9 @@ func FromEnv() Config {
 		CreatePerMinPerIP: intEnv("BYTELN_CREATE_PER_MIN_IP", 10),
 		WorkerPoolSize:    intEnv("BYTELN_WORKER_POOL", 256),
 		AcceptQueueSize:   intEnv("BYTELN_ACCEPT_QUEUE", 1024),
-		MaxFrameBytes:     intEnv("BYTELN_MAX_FRAME_BYTES", 64*1024),
+		MaxFrameBytes:     intEnv("BYTELN_MAX_FRAME_BYTES", 4<<20),
 		MaxBufferFrames:   intEnv("BYTELN_MAX_BUFFER_FRAMES", 32),
+		MaxBufferBytes:    intEnv("BYTELN_MAX_BUFFER_BYTES", 16<<20),
 		DirectoryURL:      getenv("BYTELN_DIRECTORY_URL", "https://raw.githubusercontent.com/byteln/byteln/main/directory/servers.json"),
 		CORSOrigins:       splitCSV(os.Getenv("BYTELN_CORS_ORIGINS")),
 		CORSRefresh:       durationEnv("BYTELN_CORS_REFRESH", 6*time.Hour),
