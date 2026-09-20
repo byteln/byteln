@@ -147,6 +147,16 @@ export async function mergeMessages(bucketId: string, msgs: StoredMessage[]): Pr
 	}
 }
 
+export async function deleteMessage(bucketId: string, id: string): Promise<void> {
+	const db = await openDb();
+	return new Promise((resolve, reject) => {
+		const tx = db.transaction(STORE, 'readwrite');
+		tx.objectStore(STORE).delete(`${bucketId}:${id}`);
+		tx.oncomplete = () => resolve();
+		tx.onerror = () => reject(tx.error);
+	});
+}
+
 export async function deleteMessagesForBucket(bucketId: string): Promise<void> {
 	const db = await openDb();
 	const existing = await listMessages(bucketId);

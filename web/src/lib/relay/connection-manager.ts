@@ -38,6 +38,7 @@ import { bumpRooms } from '$lib/stores/conversations';
 import {
 	addMessage,
 	defaultNickname,
+	deleteMessage,
 	getRoom,
 	getSessionToken,
 	deleteMessagesForBucket,
@@ -649,6 +650,10 @@ class ConnectionManagerImpl {
 			}
 			try {
 				const plain = await decryptMessage(r.key, buf);
+				if (plain.type === 'delete') {
+					await this.applyDelete(bucketId, plain.id);
+					return;
+				}
 				const stored: StoredMessage = {
 					...plain,
 					id: plain.id ?? crypto.randomUUID(),
@@ -932,6 +937,33 @@ class ConnectionManagerImpl {
 		await touchRoom(bucketId, messagePreview(plain));
 		bumpRooms();
 		return true;
+	}
+
+	/** Delete for everyone: send encrypted delete signal, then remove locally. */
+	async sendDelete(bucketId: string, messageId: string): Promise<boolean> {
+		const room = this.rooms.get(bucketId);
+		if (!room?.client?.connected || !messageId) return false;
+
+		const plain: PlainMessage = {
+			v: 1,
+			ts: Date.now(),
+			type: 'delete',
+			id: messageId
+		};
+		const buf = await encryptMessage(room.key, plain);
+		room.client.sendBinary(buf);
+		await this.applyDelete(bucketId, messageId);
+		return true;
+	}
+
+	private async applyDelete(bucketId: string, messageId: string): Promise<void> {
+		const prev = get(messagesByBucket)[bucketId] ?? [];
+		const next = prev.filter((m) => m.id !== messageId);
+		if (next.length !== prev.length) {
+			this.syncMessages(bucketId, next);
+		}
+		await deleteMessage(bucketId, messageId);
+		bumpRooms();
 	}
 
 	isOpen(bucketId: string): boolean {

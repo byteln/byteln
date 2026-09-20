@@ -72,10 +72,21 @@ export type ImagePlainMessage = {
 	replyTo?: ReplyRef;
 };
 
-export type PlainMessage = TextPlainMessage | ImagePlainMessage;
+/** Wire-only: remove message `id` on both peers; never stored in history. */
+export type DeletePlainMessage = {
+	v: 1;
+	ts: number;
+	type: 'delete';
+	/** Id of the message to delete (same shared UUID as text/image). */
+	id: string;
+};
+
+export type ContentPlainMessage = TextPlainMessage | ImagePlainMessage;
+export type PlainMessage = ContentPlainMessage | DeletePlainMessage;
 
 export function messagePreview(msg: PlainMessage): string {
 	if (msg.type === 'image') return '[Image]';
+	if (msg.type === 'delete') return '';
 	return msg.body;
 }
 
@@ -95,6 +106,11 @@ function parseReplyTo(raw: unknown): ReplyRef | undefined {
 
 function encodePlaintext(msg: PlainMessage): Uint8Array {
 	if (!msg.id) throw new Error('message id required');
+	if (msg.type === 'delete') {
+		return encoder.encode(
+			JSON.stringify({ v: 1, ts: msg.ts, type: 'delete', id: msg.id })
+		);
+	}
 	if (msg.type === 'text') {
 		const obj: Record<string, unknown> = {
 			v: 1,
@@ -182,12 +198,16 @@ function decodePlaintext(pt: Uint8Array): PlainMessage {
 		id?: unknown;
 		replyTo?: unknown;
 	};
-	if (
-		parsed.v !== 1 ||
-		parsed.type !== 'text' ||
-		typeof parsed.ts !== 'number' ||
-		typeof parsed.body !== 'string'
-	) {
+	if (parsed.v !== 1 || typeof parsed.ts !== 'number') {
+		throw new Error('invalid message schema');
+	}
+	if (parsed.type === 'delete') {
+		if (typeof parsed.id !== 'string' || !parsed.id) {
+			throw new Error('invalid message schema');
+		}
+		return { v: 1, ts: parsed.ts, type: 'delete', id: parsed.id };
+	}
+	if (parsed.type !== 'text' || typeof parsed.body !== 'string') {
 		throw new Error('invalid message schema');
 	}
 	const msg: TextPlainMessage = { v: 1, ts: parsed.ts, type: 'text', body: parsed.body };

@@ -6,6 +6,7 @@ import {
 	bytesToBase64,
 	bytesToBase64Url,
 	exportKeyRaw,
+	type ContentPlainMessage,
 	type ImageMime,
 	type PlainMessage,
 	type ReplyRef
@@ -14,7 +15,8 @@ import {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-export type StoredMessage = PlainMessage & { id: string; from: 'self' | 'peer' };
+/** Local history only — delete signals are wire-only and never persisted. */
+export type StoredMessage = ContentPlainMessage & { id: string; from: 'self' | 'peer' };
 
 export type ExportFile = {
 	version: 1;

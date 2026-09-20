@@ -465,6 +465,13 @@
 		replyTarget = null;
 	}
 
+	async function deleteMessage(m: StoredMessage) {
+		if (m.from !== 'self' || !key || connState !== 'open') return;
+		if (!confirm('Delete this message for both of you?')) return;
+		await connectionManager.sendDelete(bucketId, m.id);
+		if (replyTarget?.id === m.id) clearReply();
+	}
+
 	function replyOpts(): { replyTo: ReplyRef } | undefined {
 		if (!replyTarget) return undefined;
 		return { replyTo: { id: replyTarget.id, preview: replyPreview(replyTarget) } };
@@ -1098,6 +1105,13 @@
 									<button type="button" class="reply-btn" onclick={() => startReply(m)}
 										>Reply</button
 									>
+									{#if m.from === 'self'}
+										<button
+											type="button"
+											class="delete-btn"
+											onclick={() => void deleteMessage(m)}>Delete</button
+										>
+									{/if}
 								{/if}
 							</article>
 						{/each}
@@ -2213,7 +2227,8 @@
 		text-align: left;
 	}
 
-	.reply-btn {
+	.reply-btn,
+	.delete-btn {
 		display: inline-block;
 		margin-top: 0.25rem;
 		padding: 0;
@@ -2225,8 +2240,16 @@
 		cursor: pointer;
 	}
 
+	.delete-btn {
+		margin-left: 0.65rem;
+	}
+
 	.reply-btn:hover {
 		color: var(--accent);
+	}
+
+	.delete-btn:hover {
+		color: var(--danger);
 	}
 
 	.reply-chip {
