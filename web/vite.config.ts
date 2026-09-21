@@ -14,10 +14,17 @@ export default defineConfig({
 				fallback: 'index.html',
 				precompress: false,
 				strict: false
-			})
+			}),
+			serviceWorker: {
+				register: false
+			}
 		}),
 		SvelteKitPWA({
 			registerType: 'autoUpdate',
+			kit: {
+				adapterFallback: 'index.html',
+				spa: true
+			},
 			manifest: {
 				name: 'byteln',
 				short_name: 'byteln',
@@ -25,6 +32,7 @@ export default defineConfig({
 				theme_color: '#0A0C0E',
 				background_color: '#0A0C0E',
 				display: 'standalone',
+				scope: '/',
 				start_url: '/app',
 				icons: [
 					{
@@ -38,9 +46,6 @@ export default defineConfig({
 						type: 'image/png'
 					}
 				]
-			},
-			workbox: {
-				globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}']
 			}
 		})
 	]
