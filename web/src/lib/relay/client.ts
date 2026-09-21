@@ -104,6 +104,11 @@ export class RelayClient {
 		return this.ws?.readyState === WebSocket.OPEN;
 	}
 
+	/** Bytes queued in the browser send buffer (0 when drained / disconnected). */
+	get bufferedAmount() {
+		return this.ws?.bufferedAmount ?? 0;
+	}
+
 	/** Close and wait for the relay to release the seat (like a page refresh). */
 	closeAndWait(timeoutMs = 2500): Promise<void> {
 		this.autoReconnect = false;

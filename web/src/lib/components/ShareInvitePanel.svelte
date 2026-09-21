@@ -18,7 +18,7 @@
 	let appPin = $state('');
 	let error = $state('');
 	let busy = $state(false);
-	let copied = $state(false);
+	let copied = $state<'pin' | 'url' | 'both' | null>(null);
 	let shareBusy = $state<'qr' | 'invite' | null>(null);
 	let shareFlash = $state<'qr' | 'invite' | null>(null);
 	let needsAppPin = $state(false);
@@ -75,18 +75,28 @@
 		return `${location.origin}/b/${bucketId}${shareRoomHash(hash)}`;
 	}
 
+	function flashCopied(kind: 'pin' | 'url' | 'both') {
+		copied = kind;
+		setTimeout(() => {
+			if (copied === kind) copied = null;
+		}, 1500);
+	}
+
 	async function copyPin() {
 		if (!roomPin) return;
 		await navigator.clipboard.writeText(roomPin);
-		copied = true;
-		setTimeout(() => (copied = false), 1500);
+		flashCopied('pin');
+	}
+
+	async function copyRoomUrl() {
+		await navigator.clipboard.writeText(shareUrl());
+		flashCopied('url');
 	}
 
 	async function copyShareAndPin() {
 		if (!roomPin) return;
 		await navigator.clipboard.writeText(inviteText(shareUrl(), roomPin));
-		copied = true;
-		setTimeout(() => (copied = false), 1500);
+		flashCopied('both');
 	}
 
 	function flashShare(kind: 'qr' | 'invite') {
@@ -142,6 +152,9 @@
 				<button type="button" class="inline-btn" disabled={shareBusy !== null} onclick={() => void shareQr()}>
 					{shareFlash === 'qr' ? 'Shared' : shareBusy === 'qr' ? 'Sharing…' : 'Share QR'}
 				</button>
+				<button type="button" class="inline-btn" onclick={() => void copyRoomUrl()}>
+					{copied === 'url' ? 'Copied' : 'Copy room URL'}
+				</button>
 				<button
 					type="button"
 					class="inline-btn primary"
@@ -154,9 +167,11 @@
 							? 'Sharing…'
 							: 'Share link + PIN'}
 				</button>
-				<button type="button" class="inline-btn" onclick={copyPin}>{copied ? 'Copied' : 'Copy PIN'}</button>
-				<button type="button" class="inline-btn" onclick={copyShareAndPin}>
-					{copied ? 'Copied' : 'Copy link + PIN'}
+				<button type="button" class="inline-btn" onclick={() => void copyPin()}>
+					{copied === 'pin' ? 'Copied' : 'Copy PIN'}
+				</button>
+				<button type="button" class="inline-btn" onclick={() => void copyShareAndPin()}>
+					{copied === 'both' ? 'Copied' : 'Copy link + PIN'}
 				</button>
 			</div>
 		{:else if needsAppPin}

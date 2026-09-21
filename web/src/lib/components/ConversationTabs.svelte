@@ -32,6 +32,8 @@
 		anchorRight: number;
 	} | null>(null);
 	let forgetRoom = $state<RoomRecord | null>(null);
+	let switchRoom = $state<RoomRecord | null>(null);
+	let switchBusy = $state(false);
 	let shareRoom = $state<RoomRecord | null>(null);
 
 	const activeId = $derived($activeBucketId);
@@ -180,6 +182,11 @@
 		closeMenu();
 	}
 
+	function askSwitchDevice(room: RoomRecord) {
+		switchRoom = room;
+		closeMenu();
+	}
+
 	function startShare(room: RoomRecord) {
 		shareRoom = room;
 		closeMenu();
@@ -204,6 +211,27 @@
 
 	function cancelForget() {
 		forgetRoom = null;
+	}
+
+	async function confirmSwitchDevice() {
+		if (!switchRoom || switchBusy) return;
+		switchBusy = true;
+		try {
+			const bucketId = switchRoom.bucketId;
+			await connectionManager.releaseSeatForSwitch(bucketId);
+			switchRoom = null;
+			await loadRooms();
+			bumpRooms();
+			if (page.url.pathname === `/b/${bucketId}`) {
+				await goto(`/b/${bucketId}`);
+			}
+		} finally {
+			switchBusy = false;
+		}
+	}
+
+	function cancelSwitchDevice() {
+		switchRoom = null;
 	}
 
 	function onDocClick() {
@@ -239,6 +267,9 @@
 								</time>
 							</span>
 							<span class="chat-preview">
+								{#if room.seatReleased}
+									<span class="seat-tag">Seat released</span>
+								{/if}
 								<span class="chat-id" title={LINE_ID_LABEL}>{room.bucketId}</span>
 								{#if room.lastPreview}
 									· {room.lastPreview}
@@ -294,6 +325,11 @@
 		{#if menuRoom.isCreator && !menuRoom.legacy}
 			<button type="button" role="menuitem" onclick={() => startShare(menuRoom)}>
 				Share…
+			</button>
+		{/if}
+		{#if !menuRoom.seatReleased}
+			<button type="button" role="menuitem" onclick={() => askSwitchDevice(menuRoom)}>
+				Switch device…
 			</button>
 		{/if}
 		<button type="button" role="menuitem" class="danger" onclick={() => askForget(menuRoom)}>
@@ -359,6 +395,43 @@
 			<div class="modal-actions">
 				<button type="button" onclick={cancelForget}>Cancel</button>
 				<button type="button" class="danger-btn" onclick={() => confirmForget()}>Forget chat</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+{#if switchRoom}
+	<div class="modal-overlay">
+		<button
+			type="button"
+			class="modal-scrim"
+			aria-label="Close dialog"
+			onclick={cancelSwitchDevice}
+		></button>
+		<div
+			class="modal-dialog"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="switch-title"
+			tabindex="-1"
+			onkeydown={(e) => e.key === 'Escape' && cancelSwitchDevice()}
+		>
+			<h3 id="switch-title">Switch device?</h3>
+			<p class="modal-hint">
+				Releases this device’s seat on the secure line so you can open the same invite + room PIN on
+				another device. Chat history stays on this device. On the new device, Request sync so your
+				partner can approve and fill in missing messages.
+			</p>
+			<div class="modal-actions">
+				<button type="button" onclick={cancelSwitchDevice} disabled={switchBusy}>Cancel</button>
+				<button
+					type="button"
+					class="primary"
+					disabled={switchBusy}
+					onclick={() => void confirmSwitchDevice()}
+				>
+					{switchBusy ? 'Releasing…' : 'Release seat'}
+				</button>
 			</div>
 		</div>
 	</div>
@@ -497,6 +570,19 @@
 	.chat-id {
 		font-family: 'IBM Plex Mono', ui-monospace, monospace;
 		color: var(--dim, var(--muted));
+	}
+
+	.seat-tag {
+		display: inline-block;
+		margin-right: 0.35rem;
+		padding: 0.05rem 0.35rem;
+		border-radius: 0.2rem;
+		font-size: 0.65rem;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		text-transform: uppercase;
+		color: #e8b84a;
+		background: rgba(232, 184, 74, 0.12);
 	}
 
 	.unread {

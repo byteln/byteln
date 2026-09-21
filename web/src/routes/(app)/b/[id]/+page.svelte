@@ -24,8 +24,13 @@
 	import {
 		browserOffline,
 		connectionManager,
+		historyMismatchByBucket,
+		imageTransfersByBucket,
 		messagesByBucket,
-		roomRuntimes
+		resyncPromptByBucket,
+		resyncStatusByBucket,
+		roomRuntimes,
+		type ImageTransfer
 	} from '$lib/relay/connection-manager';
 	import {
 		ensureNotifyPermission,
@@ -83,6 +88,10 @@
 	let settingsOpen = $state(false);
 	let shareRoom = $state<RoomRecord | null>(null);
 	let rooms = $state<RoomRecord[]>([]);
+	let seatReleased = $state(false);
+	let rejoinBusy = $state(false);
+	let resyncConfirm = $state('');
+	let wipeBusy = $state(false);
 
 	let listEl = $state<HTMLElement | null>(null);
 	let fileInput = $state<HTMLInputElement | null>(null);
@@ -96,23 +105,77 @@
 	let dropFlashTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const messages = $derived(($messagesByBucket[bucketId] ?? []) as StoredMessage[]);
+	const imageTransfers = $derived(($imageTransfersByBucket[bucketId] ?? []) as ImageTransfer[]);
+	const sendingImage = $derived(imageTransfers.some((t) => t.direction === 'send'));
+	const imageSending = $derived(sendingImage || imageBusy);
+	const sendImagePercent = $derived.by(() => {
+		const t = imageTransfers.find((x) => x.direction === 'send');
+		return t != null ? Math.round(Math.min(1, Math.max(0, t.progress)) * 100) : null;
+	});
+	const sendProgressById = $derived.by(() => {
+		const map = new Map<string, number>();
+		for (const t of imageTransfers) {
+			if (t.direction === 'send') map.set(t.id, t.progress);
+		}
+		return map;
+	});
+	type TimelineItem =
+		| { kind: 'message'; message: StoredMessage }
+		| { kind: 'recv'; transfer: ImageTransfer };
+	const timeline = $derived.by(() => {
+		const seen = new Set<string>();
+		const items: TimelineItem[] = [];
+		for (const m of messages) {
+			if (seen.has(m.id)) continue;
+			seen.add(m.id);
+			items.push({ kind: 'message', message: m });
+		}
+		for (const t of imageTransfers) {
+			if (t.direction === 'recv' && !seen.has(t.id)) {
+				seen.add(t.id);
+				items.push({ kind: 'recv', transfer: t });
+			}
+		}
+		items.sort((a, b) => {
+			const tsA = a.kind === 'message' ? a.message.ts : a.transfer.ts;
+			const tsB = b.kind === 'message' ? b.message.ts : b.transfer.ts;
+			return tsA - tsB;
+		});
+		return items;
+	});
 	const runtime = $derived($roomRuntimes[bucketId]);
 	const connState = $derived(runtime?.connState ?? 'connecting');
 	const composerCanSend = $derived(
-		!!draft.trim() && !!key && !error && connState === 'open' && !imageBusy
+		!!draft.trim() && !!key && !error && connState === 'open' && !imageSending
 	);
 	const connDetail = $derived(runtime?.connDetail ?? '');
 	const reconnectAttempt = $derived(runtime?.reconnectAttempt ?? 0);
 	const reconnectStalled = $derived(runtime?.reconnectStalled ?? false);
 	const offline = $derived($browserOffline);
 	const peerPresent = $derived(runtime?.peerPresent ?? false);
+	const historyMismatch = $derived(!!$historyMismatchByBucket[bucketId]);
+	const resyncPrompt = $derived($resyncPromptByBucket[bucketId] ?? null);
+	const resyncNeedsConfirm = $derived(
+		!!resyncPrompt &&
+			(resyncPrompt.deviceTrust === 'new' || resyncPrompt.deviceTrust === 'unknown')
+	);
+	const resyncConfirmOk = $derived(
+		!resyncNeedsConfirm || resyncConfirm.trim().toUpperCase() === 'SYNC'
+	);
+	const deviceTrustLabel = $derived.by(() => {
+		if (!resyncPrompt) return '';
+		if (resyncPrompt.deviceTrust === 'same') return 'Same device as last time';
+		if (resyncPrompt.deviceTrust === 'new') return 'Different device than last time';
+		return 'Unknown / first-seen device';
+	});
+	const resyncStatus = $derived($resyncStatusByBucket[bucketId]);
 	const partnerConnected = $derived(
 		peerPresent || messages.some((m) => m.from === 'peer')
 	);
 	const bucketFull = $derived(runtime?.bucketFull ?? false);
 	const partnerLabelText = $derived(partnerDisplayName(nickname, bucketId));
 
-	const showScrollDown = $derived(!pinnedToBottom && messages.length > 0);
+	const showScrollDown = $derived(!pinnedToBottom && timeline.length > 0);
 	const hasOtherUnread = $derived(
 		rooms.some((r) => r.unread && r.bucketId !== bucketId)
 	);
@@ -124,7 +187,13 @@
 
 	$effect(() => {
 		if (phase !== 'chat') return;
-		const lastId = messages.at(-1)?.id;
+		const last = timeline.at(-1);
+		const lastId =
+			last == null
+				? undefined
+				: last.kind === 'message'
+					? last.message.id
+					: last.transfer.id;
 		if (!lastId || !pinnedToBottom) return;
 		void tick().then(() => {
 			if (!listEl || !pinnedToBottom) return;
@@ -204,6 +273,7 @@
 		nickname = rec?.nickname ?? defaultNickname(bucketId);
 		editNickname = nickname;
 		isCreator = rec?.isCreator === true || (rec?.isCreator !== false && room?.seat === 0);
+		seatReleased = rec?.seatReleased === true;
 	}
 
 	async function loadNames() {
@@ -383,6 +453,17 @@
 				return;
 			}
 
+			const recBeforeOpen = await getRoom(id);
+			if (gen !== bootGen) return;
+			if (recBeforeOpen?.seatReleased) {
+				seatReleased = true;
+				await ensureRoomRegistered(parsed);
+				if (gen !== bootGen) return;
+				await loadRoomMeta();
+				await enterChatPhase(false);
+				return;
+			}
+
 			const opened = await connectionManager.openRoom(id);
 			if (gen !== bootGen) return;
 			if (opened) {
@@ -498,7 +579,7 @@
 	}
 
 	async function sendImageFile(file: File | Blob) {
-		if (!key || connState !== 'open' || imageBusy) return;
+		if (!key || connState !== 'open' || imageSending) return;
 		imageBusy = true;
 		imageError = '';
 		try {
@@ -518,7 +599,7 @@
 
 	async function send() {
 		const body = draft.trim();
-		if (!body || !key || connState !== 'open' || imageBusy) return;
+		if (!body || !key || connState !== 'open' || imageSending) return;
 		const ok = await connectionManager.send(bucketId, body, replyOpts());
 		if (!ok) return;
 		draft = '';
@@ -553,7 +634,7 @@
 	}
 
 	function canAcceptDrop(e: DragEvent): boolean {
-		if (phase !== 'chat' || !key || !!error || connState !== 'open' || imageBusy) return false;
+		if (phase !== 'chat' || !key || !!error || connState !== 'open' || imageSending) return false;
 		const types = e.dataTransfer?.types;
 		if (!types) return false;
 		return Array.from(types).includes('Files');
@@ -591,7 +672,7 @@
 	function onPageDrop(e: DragEvent) {
 		e.preventDefault();
 		composerDragOver = false;
-		if (phase !== 'chat' || connState !== 'open' || imageBusy) return;
+		if (phase !== 'chat' || connState !== 'open' || imageSending) return;
 		const file = e.dataTransfer?.files?.[0];
 		if (file && file.type.startsWith('image/')) {
 			flashDrop();
@@ -706,6 +787,60 @@
 			}
 		} finally {
 			reconnectBusy = false;
+		}
+	}
+
+	async function rejoinSeat() {
+		if (rejoinBusy) return;
+		rejoinBusy = true;
+		try {
+			const opened = await connectionManager.rejoinRoom(bucketId);
+			seatReleased = false;
+			await loadRoomMeta();
+			if (opened) {
+				await enterChatPhase(false);
+			} else if (connectionManager.getRuntime(bucketId)?.bucketFull) {
+				phase = 'chat';
+			} else {
+				phase = 'line_pin';
+			}
+		} finally {
+			rejoinBusy = false;
+		}
+	}
+
+	async function approveResync() {
+		if (!resyncConfirmOk) return;
+		resyncConfirm = '';
+		await connectionManager.respondResync(bucketId, true);
+	}
+
+	async function denyResync() {
+		resyncConfirm = '';
+		await connectionManager.respondResync(bucketId, false);
+	}
+
+	async function wipeMyHistory() {
+		if (wipeBusy) return;
+		wipeBusy = true;
+		try {
+			resyncConfirm = '';
+			await connectionManager.respondResync(bucketId, false);
+			await connectionManager.wipeLocalHistory(bucketId);
+		} finally {
+			wipeBusy = false;
+		}
+	}
+
+	async function wipeBothHistories() {
+		if (wipeBusy) return;
+		wipeBusy = true;
+		try {
+			resyncConfirm = '';
+			await connectionManager.respondResync(bucketId, false);
+			await connectionManager.wipeBothHistories(bucketId);
+		} finally {
+			wipeBusy = false;
 		}
 	}
 
@@ -1065,55 +1200,218 @@
 					<p class="err">{error}</p>
 				{/if}
 
+				{#if seatReleased}
+					<div class="resync-banner" role="status">
+						<span
+							>Seat released for switching devices. Open the invite + PIN on your other device, then
+							Request sync with your partner. Or rejoin here.</span
+						>
+						<button
+							type="button"
+							class="resync-btn"
+							disabled={rejoinBusy}
+							onclick={() => void rejoinSeat()}
+						>
+							{rejoinBusy ? 'Rejoining…' : 'Rejoin'}
+						</button>
+					</div>
+				{/if}
+
+				{#if historyMismatch &&
+					peerPresent &&
+					connState === 'open' &&
+					!seatReleased &&
+					!resyncPrompt &&
+					resyncStatus?.phase !== 'waiting' &&
+					resyncStatus?.phase !== 'transferring'}
+					<div class="resync-banner" role="status">
+						<span>Chat history differs from your partner.</span>
+						<button
+							type="button"
+							class="resync-btn"
+							onclick={() => void connectionManager.requestResync(bucketId)}
+						>
+							Request sync
+						</button>
+					</div>
+				{/if}
+
+				{#if resyncPrompt}
+					<div
+						class="resync-banner"
+						class:warn={resyncPrompt.deviceTrust !== 'same'}
+						role="status"
+					>
+						<div class="resync-copy">
+							<strong>Partner wants to sync chat history.</strong>
+							<span class="resync-trust" class:danger={resyncPrompt.deviceTrust === 'new'}>
+								{deviceTrustLabel}
+							</span>
+							{#if resyncNeedsConfirm}
+								<span class="resync-warn">
+									If you did not expect a new device, Deny — or wipe history. Approving shares
+									your messages with whoever is on the other seat.
+								</span>
+								<label class="resync-confirm">
+									<span>Type SYNC to approve</span>
+									<input
+										type="text"
+										bind:value={resyncConfirm}
+										autocomplete="off"
+										autocapitalize="characters"
+										placeholder="SYNC"
+									/>
+								</label>
+							{/if}
+						</div>
+						<div class="resync-actions">
+							<button
+								type="button"
+								class="resync-btn"
+								disabled={!resyncConfirmOk || wipeBusy}
+								onclick={() => void approveResync()}
+							>
+								Approve
+							</button>
+							<button
+								type="button"
+								class="resync-btn muted-btn"
+								disabled={wipeBusy}
+								onclick={() => void denyResync()}
+							>
+								Deny
+							</button>
+							<button
+								type="button"
+								class="resync-btn muted-btn"
+								disabled={wipeBusy}
+								onclick={() => void wipeMyHistory()}
+							>
+								Wipe my copy
+							</button>
+							<button
+								type="button"
+								class="resync-btn danger-btn"
+								disabled={wipeBusy || connState !== 'open'}
+								onclick={() => void wipeBothHistories()}
+							>
+								Wipe both
+							</button>
+						</div>
+					</div>
+				{/if}
+
+				{#if resyncStatus &&
+					(resyncStatus.phase === 'waiting' ||
+						resyncStatus.phase === 'transferring' ||
+						resyncStatus.phase === 'done' ||
+						resyncStatus.phase === 'error')}
+					<p
+						class="resync-status"
+						class:err={resyncStatus.phase === 'error'}
+						role="status"
+					>
+						{resyncStatus.detail ?? ''}{#if resyncStatus.phase === 'transferring'}
+							<span class="resync-pct"
+								>{Math.round(Math.min(1, Math.max(0, resyncStatus.progress)) * 100)}%</span
+							>
+						{/if}
+					</p>
+				{/if}
+
 				<div class="list-wrap">
 					<div class="list" bind:this={listEl} onscroll={updateScrollPin}>
-						{#each messages as m (m.id)}
-							<article
-								data-msg-id={m.id}
-								class:self={m.from === 'self'}
-								class:highlight={highlightId === m.id}
-							>
-								{#if m.replyTo}
-									{@const parent = messageById.get(m.replyTo.id)}
-									<button
-										type="button"
-										class="quote"
-										onclick={() => jumpToMessage(m.replyTo!.id)}
-									>
-										{#if parent?.type === 'image'}
-											<ImageBubble
-												mime={parent.mime}
-												data={parent.data}
-												w={parent.w}
-												h={parent.h}
-												thumb
-												alt=""
-											/>
-										{:else}
-											<span class="quote-text">{m.replyTo.preview}</span>
-										{/if}
-									</button>
-								{/if}
-								<span class="who">{m.from === 'self' ? 'You' : partnerLabelText}</span>
-								{#if m.type === 'image'}
-									<ImageBubble mime={m.mime} data={m.data} w={m.w} h={m.h} />
-								{:else}
-									<p>{m.body}</p>
-								{/if}
-								<time>{new Date(m.ts).toLocaleTimeString()}</time>
-								{#if key && !error && connState === 'open'}
-									<button type="button" class="reply-btn" onclick={() => startReply(m)}
-										>Reply</button
-									>
-									{#if m.from === 'self'}
+						{#each timeline as item (item.kind === 'message' ? item.message.id : item.transfer.id)}
+							{#if item.kind === 'message'}
+								{@const m = item.message}
+								<article
+									data-msg-id={m.id}
+									class:self={m.from === 'self'}
+									class:highlight={highlightId === m.id}
+								>
+									{#if m.replyTo}
+										{@const parent = messageById.get(m.replyTo.id)}
 										<button
 											type="button"
-											class="delete-btn"
-											onclick={() => void deleteMessage(m)}>Delete</button
+											class="quote"
+											onclick={() => jumpToMessage(m.replyTo!.id)}
 										>
+											{#if parent?.type === 'image'}
+												<ImageBubble
+													mime={parent.mime}
+													data={parent.data}
+													w={parent.w}
+													h={parent.h}
+													thumb
+													alt=""
+												/>
+											{:else}
+												<span class="quote-text">{m.replyTo.preview}</span>
+											{/if}
+										</button>
 									{/if}
-								{/if}
-							</article>
+									<span class="who">{m.from === 'self' ? 'You' : partnerLabelText}</span>
+									{#if m.type === 'image'}
+										<ImageBubble
+											mime={m.mime}
+											data={m.data}
+											w={m.w}
+											h={m.h}
+											progress={sendProgressById.get(m.id) ?? null}
+										/>
+									{:else}
+										<p>{m.body}</p>
+									{/if}
+									<time>{new Date(m.ts).toLocaleTimeString()}</time>
+									{#if key && !error && connState === 'open'}
+										<button type="button" class="reply-btn" onclick={() => startReply(m)}
+											>Reply</button
+										>
+										{#if m.from === 'self'}
+											<button
+												type="button"
+												class="delete-btn"
+												onclick={() => void deleteMessage(m)}>Delete</button
+											>
+										{/if}
+									{/if}
+								</article>
+							{:else}
+								{@const t = item.transfer}
+								<article data-msg-id={t.id} class:self={t.from === 'self'}>
+									{#if t.replyTo}
+										{@const parent = messageById.get(t.replyTo.id)}
+										<button
+											type="button"
+											class="quote"
+											onclick={() => jumpToMessage(t.replyTo!.id)}
+										>
+											{#if parent?.type === 'image'}
+												<ImageBubble
+													mime={parent.mime}
+													data={parent.data}
+													w={parent.w}
+													h={parent.h}
+													thumb
+													alt=""
+												/>
+											{:else}
+												<span class="quote-text">{t.replyTo.preview}</span>
+											{/if}
+										</button>
+									{/if}
+									<span class="who">{t.from === 'self' ? 'You' : partnerLabelText}</span>
+									<ImageBubble
+										placeholder
+										mime={t.mime}
+										w={t.w}
+										h={t.h}
+										progress={t.progress}
+										alt="Receiving image"
+									/>
+									<time>{new Date(t.ts).toLocaleTimeString()}</time>
+								</article>
+							{/if}
 						{/each}
 					</div>
 
@@ -1183,7 +1481,7 @@
 									class="attach-btn"
 									aria-label="Attach image"
 									title="Attach image"
-									disabled={!key || !!error || connState !== 'open' || imageBusy}
+									disabled={!key || !!error || connState !== 'open' || imageSending}
 									onclick={() => fileInput?.click()}
 								>
 									<svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -1209,12 +1507,16 @@
 								<button
 									type="submit"
 									class="send-btn"
-									class:ready={composerCanSend || imageBusy}
-									aria-label={imageBusy ? 'Sending' : 'Send'}
-									disabled={!composerCanSend && !imageBusy}
+									class:ready={composerCanSend || imageSending}
+									aria-label={imageSending ? 'Sending' : 'Send'}
+									disabled={!composerCanSend && !imageSending}
 								>
-									{#if imageBusy}
-										<span class="send-spinner" aria-hidden="true"></span>
+									{#if imageSending}
+										{#if sendImagePercent != null}
+											<span class="send-pct" aria-hidden="true">{sendImagePercent}%</span>
+										{:else}
+											<span class="send-spinner" aria-hidden="true"></span>
+										{/if}
 									{:else}
 										<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
 											<path
@@ -1573,6 +1875,121 @@
 		color: var(--muted);
 		font-size: 0.85rem;
 		line-height: 1.4;
+	}
+
+	.resync-banner {
+		flex-shrink: 0;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: flex-start;
+		gap: 0.5rem 0.65rem;
+		margin: 0;
+		padding: 0.55rem 0.75rem;
+		border-radius: 0.35rem;
+		border: 1px solid var(--line);
+		background: rgba(18, 26, 23, 0.65);
+		color: var(--muted);
+		font-size: 0.85rem;
+		line-height: 1.4;
+	}
+
+	.resync-banner.warn {
+		border-color: rgba(232, 184, 74, 0.45);
+		background: rgba(232, 184, 74, 0.08);
+	}
+
+	.resync-copy {
+		flex: 1 1 14rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		min-width: 12ch;
+	}
+
+	.resync-copy strong {
+		color: var(--ink);
+		font-weight: 600;
+	}
+
+	.resync-trust {
+		font-size: 0.8rem;
+		color: var(--accent);
+	}
+
+	.resync-trust.danger {
+		color: #e8b84a;
+		font-weight: 600;
+	}
+
+	.resync-warn {
+		color: var(--ink);
+		opacity: 0.9;
+	}
+
+	.resync-confirm {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		font-size: 0.78rem;
+	}
+
+	.resync-confirm input {
+		font: inherit;
+		padding: 0.35rem 0.5rem;
+		border-radius: 0.3rem;
+		border: 1px solid var(--line);
+		background: var(--bg1, #0c100e);
+		color: var(--ink);
+		max-width: 10rem;
+	}
+
+	.resync-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+		align-items: center;
+	}
+
+	.resync-btn {
+		flex-shrink: 0;
+		font: inherit;
+		font-size: 0.78rem;
+		font-weight: 600;
+		padding: 0.3rem 0.6rem;
+		border-radius: 0.3rem;
+		border: none;
+		background: var(--accent);
+		color: #06110d;
+		cursor: pointer;
+	}
+
+	.resync-btn:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+
+	.resync-btn.muted-btn {
+		background: transparent;
+		color: var(--muted);
+		border: 1px solid var(--line);
+	}
+
+	.resync-btn.danger-btn {
+		background: transparent;
+		color: var(--danger, #e06b5c);
+		border: 1px solid rgba(224, 107, 92, 0.45);
+	}
+
+	.resync-status {
+		flex-shrink: 0;
+		margin: 0;
+		color: var(--muted);
+		font-size: 0.82rem;
+		line-height: 1.4;
+	}
+
+	.resync-pct {
+		margin-left: 0.35rem;
 	}
 
 	.blocked {
@@ -2471,6 +2888,14 @@
 		border-top-color: #06110d;
 		border-radius: 50%;
 		animation: spin 0.7s linear infinite;
+	}
+
+	.send-pct {
+		font-size: 0.65rem;
+		font-weight: 700;
+		letter-spacing: -0.02em;
+		color: #06110d;
+		line-height: 1;
 	}
 
 	@keyframes spin {

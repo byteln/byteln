@@ -24,6 +24,13 @@ export type RoomRecord = {
 	legacy?: boolean;
 	/** True when you created this room (seat 0) — can share the invite (link + PIN). */
 	isCreator?: boolean;
+	/**
+	 * Seat deliberately released for switching devices — keep local history/credentials
+	 * but do not auto-reconnect until the user rejoins.
+	 */
+	seatReleased?: boolean;
+	/** Last peer device fingerprint seen for this room (for sync trust UI). */
+	lastPeerDeviceFp?: string;
 };
 
 export function partnerLabel(rec: RoomRecord | null | undefined): string {
@@ -119,8 +126,13 @@ export async function listMessages(bucketId: string): Promise<StoredMessage[]> {
 		const idx = tx.objectStore(STORE).index('byBucket');
 		const req = idx.getAll(bucketId);
 		req.onsuccess = () => {
-			const rows = (req.result as Row[]).sort((a, b) => a.ts - b.ts);
-			resolve(rows.map(normalizeStored));
+			const rows = (req.result as Row[]).map(normalizeStored);
+			rows.sort((a, b) => {
+				if (a.id < b.id) return -1;
+				if (a.id > b.id) return 1;
+				return a.ts - b.ts;
+			});
+			resolve(rows);
 		};
 		req.onerror = () => reject(req.error);
 	});
@@ -332,6 +344,28 @@ export async function saveRoomCredentials(
 	const room = await getRoom(bucketId);
 	if (!room) return;
 	await upsertRoom({ ...room, ...patch });
+}
+
+export async function setSeatReleased(bucketId: string, released: boolean): Promise<void> {
+	const room = await getRoom(bucketId);
+	if (!room) return;
+	if (released) {
+		await upsertRoom({ ...room, seatReleased: true });
+	} else {
+		const { seatReleased: _drop, ...rest } = room;
+		await upsertRoom(rest);
+	}
+}
+
+export async function setLastPeerDeviceFp(bucketId: string, fp: string | null): Promise<void> {
+	const room = await getRoom(bucketId);
+	if (!room) return;
+	if (fp) {
+		await upsertRoom({ ...room, lastPeerDeviceFp: fp });
+	} else {
+		const { lastPeerDeviceFp: _drop, ...rest } = room;
+		await upsertRoom(rest);
+	}
 }
 
 /** Remove all byteln keys from sessionStorage (relay tokens, one-time PINs, etc.). */

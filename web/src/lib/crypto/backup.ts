@@ -36,7 +36,7 @@ function parseReplyTo(raw: unknown): ReplyRef | undefined {
 }
 
 /** JSON-safe message for export ciphertext (image bytes as standard base64). */
-type WireStoredMessage =
+export type WireStoredMessage =
 	| (Extract<PlainMessage, { type: 'text' }> & { id: string; from: 'self' | 'peer' })
 	| {
 			v: 1;
@@ -51,7 +51,7 @@ type WireStoredMessage =
 			replyTo?: ReplyRef;
 	  };
 
-function toWire(msg: StoredMessage): WireStoredMessage {
+export function toWire(msg: StoredMessage): WireStoredMessage {
 	if (msg.type === 'image') {
 		const w: WireStoredMessage = {
 			v: 1,
@@ -79,7 +79,7 @@ function toWire(msg: StoredMessage): WireStoredMessage {
 	return out;
 }
 
-function fromWire(raw: unknown): StoredMessage | null {
+export function fromWire(raw: unknown): StoredMessage | null {
 	if (!raw || typeof raw !== 'object') return null;
 	const m = raw as Record<string, unknown>;
 	if (typeof m.id !== 'string' || (m.from !== 'self' && m.from !== 'peer')) return null;
