@@ -64,10 +64,16 @@
 
 	.compact {
 		margin-top: 0.15rem;
+		gap: 0.45rem;
 	}
 
 	.compact svg {
 		width: min(100%, 10rem);
+	}
+
+	.compact figcaption {
+		font-size: 0.75rem;
+		max-width: 26ch;
 	}
 
 	figcaption {
@@ -77,5 +83,27 @@
 		line-height: 1.45;
 		text-align: center;
 		max-width: 28ch;
+	}
+
+	@media (max-height: 700px) {
+		.compact {
+			gap: 0.3rem;
+			margin-top: 0;
+		}
+
+		.compact svg {
+			width: min(100%, 7.5rem);
+		}
+
+		.compact figcaption {
+			font-size: 0.7rem;
+			line-height: 1.35;
+		}
+	}
+
+	@media (max-height: 560px) {
+		.compact svg {
+			width: min(100%, 6.25rem);
+		}
 	}
 </style>

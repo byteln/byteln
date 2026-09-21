@@ -910,44 +910,55 @@
 			<a class="primary home-link" href="/app">Back home</a>
 		</section>
 	{:else if phase === 'creator_share'}
-		<section class="pin-screen" aria-labelledby="creator-pin-title">
-			<a href="/app" class="back">{APP_NAME}</a>
-			<h1 id="creator-pin-title">Your room PIN</h1>
-			<p class="pin-lede">Share the <strong>link</strong> and this <strong>PIN</strong> separately.</p>
-			<p class="pin-display" aria-label="Room PIN">{creatorPin}</p>
-			<ShareQr value={shareUrl()} />
-			<p class="pin-note">Anyone with both can join. The relay never sees your PIN or messages.</p>
-			<div class="pin-actions">
-				<div class="copy-row">
-					<button type="button" class="copy-btn" disabled={shareBusy !== null} onclick={() => void shareCreatorQr()}>
-						{shareFlash === 'qr' ? 'Shared' : shareBusy === 'qr' ? 'Sharing…' : 'Share QR'}
-					</button>
-					<button
-						type="button"
-						class="copy-btn primary"
-						disabled={!creatorPin || shareBusy !== null}
-						onclick={() => void shareCreatorInvite()}
-					>
-						{shareFlash === 'invite'
-							? 'Shared'
-							: shareBusy === 'invite'
-								? 'Sharing…'
-								: 'Share link + PIN'}
-					</button>
+		<section class="pin-screen creator-share" aria-labelledby="creator-pin-title">
+			<header class="creator-share-header">
+				<a href="/app" class="back">{APP_NAME}</a>
+				<h1 id="creator-pin-title">Your room PIN</h1>
+				<p class="pin-lede">Share the <strong>link</strong> and this <strong>PIN</strong> separately.</p>
+			</header>
+			<div class="creator-share-body">
+				<p class="pin-display" aria-label="Room PIN">{creatorPin}</p>
+				<ShareQr value={shareUrl()} compact />
+				<p class="pin-note">Anyone with both can join. The relay never sees your PIN or messages.</p>
+				<div class="pin-actions">
+					<div class="copy-row">
+						<button
+							type="button"
+							class="copy-btn primary"
+							disabled={!creatorPin || shareBusy !== null}
+							onclick={() => void shareCreatorInvite()}
+						>
+							{shareFlash === 'invite'
+								? 'Shared'
+								: shareBusy === 'invite'
+									? 'Sharing…'
+									: 'Share link + PIN'}
+						</button>
+						<button
+							type="button"
+							class="copy-btn"
+							disabled={shareBusy !== null}
+							onclick={() => void shareCreatorQr()}
+						>
+							{shareFlash === 'qr' ? 'Shared' : shareBusy === 'qr' ? 'Sharing…' : 'Share QR'}
+						</button>
+					</div>
+					<div class="copy-row">
+						<button type="button" class="copy-btn" onclick={copyCreatorLink}>
+							{copiedKind === 'link' ? 'Copied' : 'Copy link'}
+						</button>
+						<button type="button" class="copy-btn" onclick={copyCreatorPinOnly}>
+							{copiedKind === 'pin' ? 'Copied' : 'Copy PIN'}
+						</button>
+						<button type="button" class="copy-btn" onclick={copyCreatorShare}>
+							{copiedKind === 'both' ? 'Copied' : 'Copy link + PIN'}
+						</button>
+					</div>
 				</div>
-				<div class="copy-row">
-					<button type="button" class="copy-btn" onclick={copyCreatorLink}>
-						{copiedKind === 'link' ? 'Copied' : 'Copy link'}
-					</button>
-					<button type="button" class="copy-btn" onclick={copyCreatorPinOnly}>
-						{copiedKind === 'pin' ? 'Copied' : 'Copy PIN'}
-					</button>
-					<button type="button" class="copy-btn" onclick={copyCreatorShare}>
-						{copiedKind === 'both' ? 'Copied' : 'Copy link + PIN'}
-					</button>
-				</div>
-				<button type="button" class="secondary" onclick={continueFromCreatorModal}>Enter chat</button>
 			</div>
+			<footer class="creator-share-footer">
+				<button type="button" class="primary" onclick={continueFromCreatorModal}>Enter chat</button>
+			</footer>
 		</section>
 	{:else if phase === 'line_pin'}
 		<section class="pin-screen" aria-labelledby="pin-title">
@@ -1746,6 +1757,52 @@
 		overflow-y: auto;
 	}
 
+	.pin-screen.creator-share {
+		min-height: 0;
+		overflow: hidden;
+		padding-bottom: 0;
+		gap: 0.75rem;
+	}
+
+	.creator-share-header {
+		flex-shrink: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.creator-share-header h1 {
+		margin-top: 0.25rem;
+	}
+
+	.creator-share-body {
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		padding-bottom: 0.35rem;
+		-webkit-overflow-scrolling: touch;
+	}
+
+	.creator-share-body .pin-display {
+		margin: 0.35rem 0;
+	}
+
+	.creator-share-footer {
+		flex-shrink: 0;
+		display: flex;
+		flex-direction: column;
+		padding: 0.65rem 0 calc(0.75rem + env(safe-area-inset-bottom, 0px));
+		border-top: 1px solid var(--line);
+		background: linear-gradient(to top, rgba(10, 12, 14, 0.96) 70%, rgba(10, 12, 14, 0.85));
+	}
+
+	.creator-share-footer .primary {
+		width: 100%;
+	}
+
 	.pin-screen h1 {
 		font-family: var(--font-display);
 		font-size: 1.75rem;
@@ -1766,6 +1823,71 @@
 		text-align: center;
 		margin: 1rem 0;
 		color: var(--accent);
+	}
+
+	@media (max-width: 719px) {
+		.pin-screen.creator-share {
+			gap: 0.5rem;
+			padding-top: 0.15rem;
+		}
+
+		.creator-share-header {
+			gap: 0.35rem;
+		}
+
+		.pin-screen.creator-share h1 {
+			font-size: 1.45rem;
+			margin-top: 0.1rem;
+		}
+
+		.pin-screen.creator-share .pin-lede {
+			font-size: 0.92rem;
+			line-height: 1.4;
+		}
+
+		.creator-share-body {
+			gap: 0.55rem;
+		}
+
+		.creator-share-body .pin-display {
+			font-size: 2rem;
+			letter-spacing: 0.28em;
+			margin: 0.15rem 0;
+		}
+
+		.pin-screen.creator-share .pin-note {
+			font-size: 0.8rem;
+		}
+
+		.pin-screen.creator-share .pin-actions {
+			margin-top: 0.15rem;
+			gap: 0.4rem;
+		}
+
+		.pin-screen.creator-share .copy-btn {
+			padding: 0.55rem 0.75rem;
+			min-width: 0;
+			font-size: 0.9rem;
+		}
+
+		.creator-share-footer {
+			padding-top: 0.55rem;
+		}
+	}
+
+	@media (max-height: 700px) {
+		.pin-screen.creator-share h1 {
+			font-size: 1.35rem;
+		}
+
+		.creator-share-body .pin-display {
+			font-size: 1.75rem;
+			letter-spacing: 0.22em;
+		}
+
+		.creator-share-body {
+			gap: 0.45rem;
+		}
 	}
 
 	.pin-form {
