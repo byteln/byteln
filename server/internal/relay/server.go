@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,19 +36,41 @@ type Server struct {
 	done     chan struct{}
 	wg       sync.WaitGroup
 
+	// powSecret signs stateless proof-of-work challenges (see pow.go).
+	// Generated once at startup; never persisted, never derived from any
+	// client-supplied or room-related value.
+	powSecret []byte
+
 	mu    sync.Mutex
 	peers map[*Peer]struct{}
 }
 
 type Peer struct {
-	conn      net.Conn
-	desc      *netpoll.Desc
-	bucket    string
-	slot      int
-	token     string
-	ip        string
-	creatorIP string
-	server    *Server
+	conn   net.Conn
+	bucket string
+	token  string
+	ip     string
+	server *Server
+
+	// slot is assigned by the registry while it holds the bucket lock (see
+	// bucket.SlotAware), so it is set before this peer is reachable to the
+	// other seat and needs no further synchronization.
+	slot int
+
+	// descMu guards desc for its whole lifetime. The peer is reachable by
+	// other goroutines (registry, writeLoop) before handleConn registers it
+	// with the poller, so poller.Start must not overlap a concurrent
+	// dropPeer's poller.Stop/desc.Close — both touch the same *os.File, and
+	// closing first would leave a dead peer's callback bound to an fd
+	// number the kernel can hand to the next connection.
+	descMu sync.Mutex
+	desc   *netpoll.Desc
+
+	// Per-connection throughput limiter + traffic-shape signal (metadata
+	// layer only — never inspects frame content). See throttle.go.
+	byteLimiter  *tokenBucket
+	frameLimiter *tokenBucket
+	shape        shapeStats
 
 	sendCh    chan outbound
 	writeMu   sync.Mutex
@@ -56,6 +79,9 @@ type Peer struct {
 	readAgain atomic.Bool
 	closed    atomic.Bool
 }
+
+// SetSlot implements bucket.SlotAware.
+func (p *Peer) SetSlot(slot int) { p.slot = slot }
 
 type outbound struct {
 	data   []byte
@@ -68,6 +94,10 @@ func New(cfg config.Config) (*Server, error) {
 		return nil, fmt.Errorf("netpoll: %w", err)
 	}
 	allow := cors.New(cfg.DirectoryURL, cfg.CORSOrigins)
+	powSecret := make([]byte, 32)
+	if _, err := rand.Read(powSecret); err != nil {
+		return nil, fmt.Errorf("pow secret: %w", err)
+	}
 	s := &Server{
 		cfg: cfg,
 		reg: bucket.NewRegistry(bucket.Config{
@@ -77,12 +107,13 @@ func New(cfg config.Config) (*Server, error) {
 			MaxBufferFrames: cfg.MaxBufferFrames,
 			MaxBufferBytes:  cfg.MaxBufferBytes,
 		}),
-		limit:   ratelimit.New(cfg.CreatePerMinPerIP, cfg.MaxBucketsPerIP),
-		workers: NewWorker(cfg.WorkerPoolSize),
-		poller:  poller,
-		cors:    allow,
-		done:    make(chan struct{}),
-		peers:   make(map[*Peer]struct{}),
+		limit:     ratelimit.New(cfg.CreatePerMinPerIP, cfg.MaxBucketsPerIP),
+		workers:   NewWorker(cfg.WorkerPoolSize),
+		poller:    poller,
+		cors:      allow,
+		done:      make(chan struct{}),
+		peers:     make(map[*Peer]struct{}),
+		powSecret: powSecret,
 	}
 	// Async first-run refresh — start with embedded allowlist immediately.
 	go func() {
@@ -150,6 +181,23 @@ func (s *Server) Shutdown() {
 	default:
 		close(s.done)
 	}
+
+	// Tear down live peers before the poller: each dropPeer deregisters and
+	// closes its desc, so no dup'd fd or epoll registration outlives the
+	// server. dropPeer takes s.mu itself, so snapshot the set first.
+	s.mu.Lock()
+	peers := make([]*Peer, 0, len(s.peers))
+	for p := range s.peers {
+		peers = append(peers, p)
+	}
+	s.mu.Unlock()
+	for _, p := range peers {
+		s.dropPeer(p)
+	}
+	if c, ok := s.poller.(interface{ Close() error }); ok {
+		_ = c.Close()
+	}
+
 	s.wg.Wait()
 }
 
@@ -194,6 +242,22 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
+	// Plain HTTP (not a WS upgrade) endpoint so a browser client can fetch a
+	// proof-of-work challenge — and, cheaply, learn that none is required —
+	// before ever attempting the WS handshake. The WS path below remains the
+	// authoritative check; this just lets a real client avoid burning a
+	// connect attempt (and its create-rate budget) discovering it needs one.
+	if method == "OPTIONS" && (path == "/pow-challenge" || path == "/pow-challenge/") {
+		writeCORSPreflight(br, s.cors.CORSOrigin(origin))
+		_ = conn.Close()
+		return
+	}
+	if method == "GET" && (path == "/pow-challenge" || path == "/pow-challenge/") {
+		s.writePowChallengeResponse(br, s.cors.CORSOrigin(origin))
+		_ = conn.Close()
+		return
+	}
+
 	if method != "GET" || !strings.HasPrefix(path, "/bucket/") {
 		writeHTTP(br, 404, "text/plain", "not found\n", "")
 		_ = conn.Close()
@@ -218,6 +282,21 @@ func (s *Server) handleConn(conn net.Conn) {
 		writeHTTP(br, 403, "text/plain", "origin not allowed\n", "")
 		_ = conn.Close()
 		return
+	}
+
+	// Optional proof-of-work gate (disabled by default via difficulty=0).
+	// Applies to both bucket creation and join attempts, ahead of the
+	// create-rate limiter, so a failed/missing solve doesn't consume the
+	// caller's create budget. Stateless: no per-challenge storage.
+	if s.cfg.PowDifficultyBits > 0 {
+		pow := u.Query().Get("pow")
+		if pow == "" || !s.verifyPow(pow) {
+			challenge := s.issuePowChallenge()
+			body := fmt.Sprintf(`{"required":true,"challenge":%q,"difficulty":%d}`, challenge, s.cfg.PowDifficultyBits)
+			writeHTTP(br, 401, "application/json", body+"\n", s.cors.CORSOrigin(origin))
+			_ = conn.Close()
+			return
+		}
 	}
 
 	token := u.Query().Get("token")
@@ -253,13 +332,16 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
+	now := time.Now()
 	p := &Peer{
-		conn:   br,
-		bucket: bucketID,
-		token:  token,
-		ip:     ip,
-		server: s,
-		sendCh: make(chan outbound, 64),
+		conn:         br,
+		bucket:       bucketID,
+		token:        token,
+		ip:           ip,
+		server:       s,
+		sendCh:       make(chan outbound, 64),
+		byteLimiter:  newTokenBucket(float64(s.cfg.MaxBytesPerSecConn)*2, now),
+		frameLimiter: newTokenBucket(float64(s.cfg.MaxFramesPerSecConn)*2, now),
 	}
 
 	jr := s.reg.Join(bucketID, token, deviceSessionID, ip, p)
@@ -271,14 +353,13 @@ func (s *Server) handleConn(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	p.slot = jr.Slot
-	creatorIP := jr.Bucket.CreatorIP
+	slot := jr.Slot // p.slot was set by Join, under the bucket lock
 
 	s.mu.Lock()
 	s.peers[p] = struct{}{}
 	s.mu.Unlock()
 
-	s.sendControl(p, protocol.Control{Type: protocol.CtrlSlot, Slot: &p.slot})
+	s.sendControl(p, protocol.Control{Type: protocol.CtrlSlot, Slot: &slot})
 	s.notifyPeerPresence(jr.Bucket)
 
 	for _, f := range s.reg.DrainBuffer(jr.Bucket) {
@@ -293,25 +374,35 @@ func (s *Server) handleConn(conn net.Conn) {
 	desc, err := netpoll.HandleRead(conn)
 	if err != nil {
 		log.Printf("netpoll handle: %v", err)
-		s.dropPeer(p, creatorIP)
+		s.dropPeer(p)
+		return
+	}
+
+	p.descMu.Lock()
+	if p.closed.Load() {
+		// Dropped while we were creating the desc — dropPeer has already run
+		// its teardown (or found no desc to tear down), so close ours here
+		// rather than registering a descriptor nobody will deregister.
+		p.descMu.Unlock()
+		_ = desc.Close()
 		return
 	}
 	p.desc = desc
-	p.creatorIP = creatorIP
 	err = s.poller.Start(desc, func(ev netpoll.Event) {
 		if p.closed.Load() {
 			return
 		}
 		if ev&(netpoll.EventReadHup|netpoll.EventHup) != 0 {
-			s.workers.TryGo(func() { s.dropPeer(p, p.creatorIP) })
+			s.workers.TryGo(func() { s.dropPeer(p) })
 			return
 		}
 		if ev&netpoll.EventRead != 0 {
 			s.workers.TryGo(func() { s.readPeer(p) })
 		}
 	})
+	p.descMu.Unlock()
 	if err != nil {
-		s.dropPeer(p, creatorIP)
+		s.dropPeer(p)
 	}
 }
 
@@ -336,20 +427,20 @@ func (s *Server) readPeer(p *Peer) {
 
 		idle := false
 		for {
-			data, op, err := s.readClientFrame(p.conn)
+			data, op, err := s.readClientFrame(p)
 			if err != nil {
 				if ne, ok := err.(net.Error); ok && ne.Timeout() {
 					idle = true
 					break
 				}
 				if err == io.EOF || strings.Contains(err.Error(), "closed") {
-					s.dropPeer(p, p.creatorIP)
+					s.dropPeer(p)
 					return
 				}
 				return
 			}
 			if op == ws.OpClose {
-				s.dropPeer(p, p.creatorIP)
+				s.dropPeer(p)
 				return
 			}
 			if op == ws.OpPing {
@@ -375,12 +466,47 @@ func (s *Server) readPeer(p *Peer) {
 			if len(data) > s.cfg.MaxFrameBytes {
 				continue
 			}
+
+			// Per-connection throughput limiter + traffic-shape signal.
+			// Metadata-layer only: rate/size/timing, never frame content.
+			// A bot-like shape (sustained, low-variance, large frames —
+			// the chunked-file-transfer signature) tightens the effective
+			// rate rather than blocking outright; the throughput cap below
+			// is what actually closes the connection.
+			now := time.Now()
+			botLike := p.shape.observe(now, len(data))
+			byteRate := float64(s.cfg.MaxBytesPerSecConn)
+			frameRate := float64(s.cfg.MaxFramesPerSecConn)
+			if botLike {
+				byteRate /= 2
+				frameRate /= 2
+			}
+			if !p.byteLimiter.allow(now, float64(len(data)), byteRate) ||
+				!p.frameLimiter.allow(now, 1, frameRate) {
+				s.closePeerWithCode(p, protocol.CloseRateExceeded, "rate exceeded")
+				return
+			}
+
 			b := s.reg.Get(p.bucket)
 			if b == nil {
-				s.dropPeer(p, p.creatorIP)
+				s.dropPeer(p)
 				return
 			}
 			b.Touch()
+
+			// Per-bucket lifetime caps: cumulative bytes and hard duration.
+			// Touch() above resets the idle timer on every frame, so a
+			// sustained sender would otherwise never hit IdleTTL — these
+			// caps are independent of idle detection.
+			if s.cfg.MaxBucketLifetimeBytes > 0 && b.RecordBytes(len(data)) > s.cfg.MaxBucketLifetimeBytes {
+				s.closeBucketPeers(b, protocol.CloseBucketLifetime, "bucket byte cap exceeded")
+				return
+			}
+			if s.cfg.MaxBucketLifetime > 0 && b.Age(now) > s.cfg.MaxBucketLifetime {
+				s.closeBucketPeers(b, protocol.CloseBucketLifetime, "bucket lifetime exceeded")
+				return
+			}
+
 			if s.reg.BufferIfAlone(b, p.slot, data, op == ws.OpBinary) {
 				continue
 			}
@@ -399,9 +525,10 @@ func (s *Server) readPeer(p *Peer) {
 
 // readClientFrame reads one application data frame. Short idle deadline for
 // the header; longer deadline once a payload is in flight (images up to MaxFrameBytes).
-func (s *Server) readClientFrame(conn net.Conn) ([]byte, ws.OpCode, error) {
+func (s *Server) readClientFrame(p *Peer) ([]byte, ws.OpCode, error) {
+	conn := p.conn
 	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-	controlHandler := wsutil.ControlFrameHandler(conn, ws.StateServerSide)
+	controlHandler := wsutil.ControlFrameHandler(peerWriter{p}, ws.StateServerSide)
 	rd := wsutil.Reader{
 		Source:         conn,
 		State:          ws.StateServerSide,
@@ -459,6 +586,27 @@ func (p *Peer) ensureWriter() {
 	go p.writeLoop()
 }
 
+// writeFrame writes one server frame. Every server-to-client frame goes
+// through here (or through peerWriter) so that a close frame emitted from a
+// read/limiter path can never interleave with the writer goroutine's bytes
+// and desync the client's frame stream.
+func (p *Peer) writeFrame(op ws.OpCode, data []byte) error {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	return wsutil.WriteServerMessage(p.conn, op, data)
+}
+
+// peerWriter lets gobwas emit its own control-frame replies (pong, close
+// echo) without bypassing writeMu. ControlHandler builds each control frame
+// in one buffered Write, so locking per Write keeps the frame atomic.
+type peerWriter struct{ p *Peer }
+
+func (w peerWriter) Write(b []byte) (int, error) {
+	w.p.writeMu.Lock()
+	defer w.p.writeMu.Unlock()
+	return w.p.conn.Write(b)
+}
+
 func (p *Peer) writeLoop() {
 	defer p.writing.Store(false)
 	for {
@@ -467,11 +615,8 @@ func (p *Peer) writeLoop() {
 			if !ok {
 				return
 			}
-			p.writeMu.Lock()
-			err := wsutil.WriteServerMessage(p.conn, msg.opCode, msg.data)
-			p.writeMu.Unlock()
-			if err != nil {
-				p.server.dropPeer(p, p.creatorIP)
+			if err := p.writeFrame(msg.opCode, msg.data); err != nil {
+				p.server.dropPeer(p)
 				return
 			}
 		drain:
@@ -481,11 +626,8 @@ func (p *Peer) writeLoop() {
 					if !ok {
 						return
 					}
-					p.writeMu.Lock()
-					err := wsutil.WriteServerMessage(p.conn, msg.opCode, msg.data)
-					p.writeMu.Unlock()
-					if err != nil {
-						p.server.dropPeer(p, p.creatorIP)
+					if err := p.writeFrame(msg.opCode, msg.data); err != nil {
+						p.server.dropPeer(p)
 						return
 					}
 				default:
@@ -509,14 +651,44 @@ func (s *Server) sendControl(p *Peer, c protocol.Control) {
 	p.Enqueue(b, ws.OpText)
 }
 
-func (s *Server) dropPeer(p *Peer, creatorIP string) {
+// closePeerWithCode sends a WS close frame with a specific application code
+// (so an honest client gets a clear signal instead of frames silently
+// vanishing) and then tears the connection down.
+func (s *Server) closePeerWithCode(p *Peer, code int, reason string) {
+	_ = p.writeFrame(ws.OpClose, ws.NewCloseFrameBody(ws.StatusCode(code), reason))
+	s.dropPeer(p)
+}
+
+// closeBucketPeers closes both seats of a bucket with the given code, used
+// for bucket-wide limits (lifetime bytes/duration) rather than a single
+// connection's rate.
+func (s *Server) closeBucketPeers(b *bucket.Bucket, code int, reason string) {
+	for slot := 0; slot < 2; slot++ {
+		if conn := b.PeerConn(slot); conn != nil {
+			if rp, ok := conn.(*Peer); ok {
+				s.closePeerWithCode(rp, code, reason)
+			}
+		}
+	}
+}
+
+func (s *Server) dropPeer(p *Peer) {
 	if !p.closed.CompareAndSwap(false, true) {
 		return
 	}
+
+	// Read the creator IP while the bucket is still around. If SweepIdle got
+	// there first it already released the IP, and this returns "" so we don't
+	// release it twice.
+	creatorIP := s.reg.CreatorIP(p.bucket)
+
+	p.descMu.Lock()
 	if p.desc != nil {
 		_ = s.poller.Stop(p.desc)
 		_ = p.desc.Close()
+		p.desc = nil
 	}
+	p.descMu.Unlock()
 	_ = p.conn.Close()
 
 	s.mu.Lock()
@@ -563,6 +735,19 @@ func headerGet(h map[string]string, k string) string {
 
 func writeHealth(w io.Writer, allowOrigin string) {
 	body := `{"ok":true,"service":"bytelnd"}`
+	writeHTTP(w, 200, "application/json", body+"\n", allowOrigin)
+}
+
+// writePowChallengeResponse answers GET /pow-challenge. Stateless and side
+// effect free: no rate-limit budget or bucket registry lookup touched, so a
+// client can call this on every connect attempt (or reconnect) without cost.
+func (s *Server) writePowChallengeResponse(w io.Writer, allowOrigin string) {
+	if s.cfg.PowDifficultyBits <= 0 {
+		writeHTTP(w, 200, "application/json", `{"required":false}`+"\n", allowOrigin)
+		return
+	}
+	challenge := s.issuePowChallenge()
+	body := fmt.Sprintf(`{"required":true,"challenge":%q,"difficulty":%d}`, challenge, s.cfg.PowDifficultyBits)
 	writeHTTP(w, 200, "application/json", body+"\n", allowOrigin)
 }
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { env } from '$env/dynamic/public';
 	import AppSettings from '$lib/components/AppSettings.svelte';
@@ -398,14 +399,14 @@
 				hash = creds?.roomHash || rec?.roomHash || '';
 				if (hash && !hash.startsWith('#')) hash = `#${hash}`;
 				if (hash.includes('key=')) {
-					history.replaceState(null, '', `${location.pathname}${hash}`);
+					replaceState(`${location.pathname}${hash}`, {});
 				}
 			}
 
 			const { hash: cleanHash, pinHint } = sanitizeRoomFragmentInput(hash);
 			if (cleanHash.includes('key=')) {
 				hash = cleanHash;
-				history.replaceState(null, '', `${location.pathname}${hash}`);
+				replaceState(`${location.pathname}${hash}`, {});
 			}
 			if (pinHint) pinInput = pinHint;
 
@@ -417,7 +418,7 @@
 			room = parsed;
 			key = await importKeyRaw(parsed.keyRaw);
 			if (gen !== bootGen) return;
-			history.replaceState(null, '', `${location.pathname}${hash}`);
+			replaceState(`${location.pathname}${hash}`, {});
 
 			const fallback = defaultRelayUrl(env.PUBLIC_DEFAULT_RELAY);
 			relayUrl = await resolveRelayUrl(fallback);

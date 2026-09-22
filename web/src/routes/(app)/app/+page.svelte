@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
+	import { goto, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import AppSettings from '$lib/components/AppSettings.svelte';
 	import ChatListSidePanel from '$lib/components/ChatListSidePanel.svelte';
@@ -28,7 +28,7 @@
 				const url = new URL(page.url);
 				url.searchParams.delete('create');
 				url.searchParams.delete('new');
-				history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`);
+				replaceState(`${url.pathname}${url.search}${url.hash}`, {});
 				busy = true;
 				try {
 					await startSecureLine();

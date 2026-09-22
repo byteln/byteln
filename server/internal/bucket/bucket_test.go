@@ -269,6 +269,34 @@ func TestIdleEmptyBucketSwept(t *testing.T) {
 	}
 }
 
+func TestRecordBytesAccumulates(t *testing.T) {
+	reg := bucket.NewRegistry(testCfg(nil))
+	j := reg.Join("b1", "tokA", "sidA", "1.1.1.1", "c1")
+	b := j.Bucket
+
+	if got := b.RecordBytes(100); got != 100 {
+		t.Fatalf("first RecordBytes: got %d want 100", got)
+	}
+	if got := b.RecordBytes(50); got != 150 {
+		t.Fatalf("second RecordBytes: got %d want 150", got)
+	}
+}
+
+func TestAgeReflectsElapsedTime(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	reg := bucket.NewRegistry(testCfg(&now))
+	j := reg.Join("b1", "tokA", "sidA", "1.1.1.1", "c1")
+	b := j.Bucket
+
+	if age := b.Age(now); age != 0 {
+		t.Fatalf("age at creation: got %v want 0", age)
+	}
+	later := now.Add(90 * time.Minute)
+	if age := b.Age(later); age != 90*time.Minute {
+		t.Fatalf("age after 90m: got %v want 90m", age)
+	}
+}
+
 func TestTouchUpdatesLastSeen(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	reg := bucket.NewRegistry(testCfg(&now))

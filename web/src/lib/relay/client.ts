@@ -1,3 +1,5 @@
+import { solvePowForConnect } from './pow';
+
 export type ControlHandler = (msg: { t: string; n?: number }) => void;
 export type BinaryHandler = (data: ArrayBuffer) => void;
 export type StatusHandler = (
@@ -16,6 +18,10 @@ export class RelayClient {
 	private intentionalClose = false;
 	private reconnectAttempt = 0;
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	// Bumped by every connect()/close() so a proof-of-work solve in flight
+	// from a superseded connect() attempt can't open a stale socket after
+	// the caller has already moved on (closed, or started a newer connect).
+	private connectGeneration = 0;
 	autoReconnect: boolean;
 	private maxReconnectDelayMs: number;
 
@@ -55,7 +61,37 @@ export class RelayClient {
 		const isRetry = this.reconnectAttempt > 0;
 		this.onStatus?.(isRetry ? 'reconnecting' : 'connecting');
 
-		const ws = new WebSocket(this.url);
+		const generation = ++this.connectGeneration;
+		void this.openSocket(generation);
+	}
+
+	/**
+	 * Solves the relay's proof-of-work challenge (if it requires one — most
+	 * don't, so this is normally a single cheap cached fetch) before opening
+	 * the actual WebSocket. A rejected WS upgrade never surfaces its HTTP
+	 * response body to page JS, so this has to happen up front rather than
+	 * reactively after a failed connect.
+	 */
+	private async openSocket(generation: number) {
+		let url = this.url;
+		try {
+			const pow = await solvePowForConnect(this.url);
+			if (pow) {
+				const u = new URL(this.url);
+				u.searchParams.set('pow', pow);
+				url = u.toString();
+			}
+		} catch {
+			// Fall back to connecting without a solution; if one was
+			// actually required the relay rejects the upgrade as usual and
+			// this surfaces through the normal onerror/onclose path below.
+		}
+
+		// Superseded by a newer connect() or an explicit close() while the
+		// challenge was being solved — don't open a socket nobody wants.
+		if (generation !== this.connectGeneration) return;
+
+		const ws = new WebSocket(url);
 		ws.binaryType = 'arraybuffer';
 		this.ws = ws;
 
@@ -113,6 +149,7 @@ export class RelayClient {
 	closeAndWait(timeoutMs = 2500): Promise<void> {
 		this.autoReconnect = false;
 		this.clearReconnectTimer();
+		this.connectGeneration++;
 		const ws = this.ws;
 		if (!ws || ws.readyState === WebSocket.CLOSED) {
 			this.intentionalClose = true;
@@ -138,6 +175,7 @@ export class RelayClient {
 	close() {
 		this.autoReconnect = false;
 		this.clearReconnectTimer();
+		this.connectGeneration++;
 		this.intentionalClose = true;
 		this.ws?.close();
 		this.ws = null;

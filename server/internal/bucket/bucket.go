@@ -12,6 +12,21 @@ type Conn interface {
 	RemoteAddr() string
 }
 
+// SlotAware lets a joining conn learn its seat index while the bucket lock is
+// still held — that is, before the conn becomes reachable to the other seat
+// through the registry. A seat assigned after Join returns would be published
+// without synchronization, and a peer torn down in that window would leave
+// through the wrong seat.
+type SlotAware interface {
+	SetSlot(slot int)
+}
+
+func seat(conn any, slot int) {
+	if sa, ok := conn.(SlotAware); ok {
+		sa.SetSlot(slot)
+	}
+}
+
 type BufferedFrame struct {
 	Data      []byte
 	Binary    bool
@@ -39,12 +54,17 @@ type Config struct {
 }
 
 type Bucket struct {
-	ID       string
-	Peers    [2]*Peer
-	Created  time.Time
-	LastSeen time.Time
-	Buffer   []BufferedFrame
+	ID        string
+	Peers     [2]*Peer
+	Created   time.Time
+	LastSeen  time.Time
+	Buffer    []BufferedFrame
 	CreatorIP string
+
+	// BytesRelayed is the cumulative number of application-data bytes
+	// forwarded through this bucket over its lifetime (metadata-layer
+	// counter; the relay never inspects the content of those bytes).
+	BytesRelayed int64
 
 	mu sync.Mutex
 }
@@ -94,6 +114,7 @@ func (r *Registry) Join(id, token, deviceSessionID, ip string, conn any) JoinRes
 
 		b.mu.Lock()
 		defer b.mu.Unlock()
+		seat(conn, 0)
 		b.Peers[0] = &Peer{
 			Conn:            conn,
 			Token:           token,
@@ -123,6 +144,7 @@ func (r *Registry) Join(id, token, deviceSessionID, ip string, conn any) JoinRes
 			}
 
 			if deviceSessionMatches(p, deviceSessionID) && p.Connected {
+				seat(conn, i)
 				p.Conn = conn
 				p.LastSeen = now
 				p.DroppedAt = time.Time{}
@@ -135,6 +157,7 @@ func (r *Registry) Join(id, token, deviceSessionID, ip string, conn any) JoinRes
 			}
 
 			if deviceSessionMatches(p, deviceSessionID) && !p.DroppedAt.IsZero() && now.Sub(p.DroppedAt) <= r.cfg.ReclaimTTL {
+				seat(conn, i)
 				p.Conn = conn
 				p.LastSeen = now
 				p.DroppedAt = time.Time{}
@@ -156,6 +179,7 @@ func (r *Registry) Join(id, token, deviceSessionID, ip string, conn any) JoinRes
 	for i := 0; i < 2; i++ {
 		p := b.Peers[i]
 		if p == nil {
+			seat(conn, i)
 			b.Peers[i] = &Peer{
 				Conn:            conn,
 				Token:           token,
@@ -167,6 +191,7 @@ func (r *Registry) Join(id, token, deviceSessionID, ip string, conn any) JoinRes
 			return JoinResult{Bucket: b, Slot: i}
 		}
 		if !p.Connected && !peerSeatHeld(p, now, r.cfg.ReclaimTTL) {
+			seat(conn, i)
 			b.Peers[i] = &Peer{
 				Conn:            conn,
 				Token:           token,
@@ -434,4 +459,24 @@ func (b *Bucket) Touch() {
 			p.LastSeen = b.LastSeen
 		}
 	}
+}
+
+// RecordBytes adds n to the bucket's lifetime relayed-byte counter and
+// returns the new total. Used for the per-bucket lifetime byte cap —
+// independent of Touch()/IdleTTL, which reset on any activity and so never
+// bound a sustained sender.
+func (b *Bucket) RecordBytes(n int) int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.BytesRelayed += int64(n)
+	return b.BytesRelayed
+}
+
+// Age returns how long ago the bucket was created. Used for the hard max
+// bucket lifetime cap, which — unlike IdleTTL — cannot be reset by ongoing
+// traffic.
+func (b *Bucket) Age(now time.Time) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return now.Sub(b.Created)
 }
