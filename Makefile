@@ -25,6 +25,6 @@ dev: dev-all
 dev-all:
 	@echo "bytelnd → :$(PORT)  |  web → :$(WEB_PORT)"
 	@trap 'kill 0' EXIT INT TERM; \
-		(cd server && BYTELN_PORT=$(PORT) go run ./cmd/bytelnd) & \
+		(cd server && BYTELN_PORT=$(PORT) BYTELN_POW_DIFFICULTY=8 go run ./cmd/bytelnd) & \
 		(cd web && PUBLIC_DEFAULT_RELAY=ws://127.0.0.1:$(PORT) npm run dev -- --host 127.0.0.1 --port $(WEB_PORT)) & \
 		wait

@@ -22,6 +22,15 @@ describe('solvePowChallenge', () => {
 		const solution = await solvePowChallenge('anything', 0);
 		expect(typeof solution).toBe('string');
 	});
+
+	// Regression: a difficulty misconfigured too high relative to the
+	// server's challenge TTL must not hang forever — it should give up with
+	// margin so the caller's fallback (connect without a solution, let the
+	// relay reject it, retry on the next backoff) takes over instead of a
+	// permanently-stuck "Verifying connection…" loader.
+	it('gives up instead of looping forever on an unreachable difficulty', async () => {
+		await expect(solvePowChallenge('anything', 256, 50)).rejects.toThrow(/timeout|difficulty/);
+	});
 });
 
 describe('getPowChallenge / solvePowForConnect', () => {

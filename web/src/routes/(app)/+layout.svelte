@@ -1,4 +1,5 @@
 <script lang="ts">
+	import GlobalLoader from '$lib/components/GlobalLoader.svelte';
 	import VaultGate from '$lib/components/VaultGate.svelte';
 
 	let { children } = $props();
@@ -18,6 +19,7 @@
 	<VaultGate>
 		{@render children()}
 	</VaultGate>
+	<GlobalLoader />
 </div>
 
 <style>

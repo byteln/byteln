@@ -10,6 +10,8 @@
  * has to fetch GET {relay}/pow-challenge first and solve before connecting.
  */
 
+import { globalLoader } from '$lib/stores/global-loader.svelte';
+
 const encoder = new TextEncoder();
 
 export type PowChallengeInfo = {
@@ -82,8 +84,23 @@ function leadingZeroBits(bytes: Uint8Array): number {
 	return n;
 }
 
+// Hard ceiling on how long we'll brute-force a single challenge, kept safely
+// under the server's issuePowChallenge TTL (30s in pow.go). A challenge
+// solved after it has expired is just as useless as never solving it — the
+// relay rejects it either way — so past this point there is zero reason to
+// keep spinning. Bailing here (rather than looping until the caller's own
+// WS-level reconnect eventually gives up) is what keeps a misconfigured
+// difficulty from presenting as a stuck "Verifying connection…" loader: the
+// caller's existing catch/fallback takes over immediately instead.
+const SOLVE_TIMEOUT_MS = 20_000;
+
 /** Brute-forces a solution for `challenge` meeting `difficulty` leading zero bits. */
-export async function solvePowChallenge(challenge: string, difficulty: number): Promise<string> {
+export async function solvePowChallenge(
+	challenge: string,
+	difficulty: number,
+	timeoutMs = SOLVE_TIMEOUT_MS
+): Promise<string> {
+	const deadline = Date.now() + timeoutMs;
 	for (let i = 0; ; i++) {
 		const solution = i.toString();
 		const digest = await crypto.subtle.digest('SHA-256', encoder.encode(challenge + solution));
@@ -91,8 +108,12 @@ export async function solvePowChallenge(challenge: string, difficulty: number): 
 			return solution;
 		}
 		// Yield to the event loop periodically so a slower device (or a
-		// difficulty tuned higher than "instant") doesn't freeze the tab.
+		// difficulty tuned higher than "instant") doesn't freeze the tab —
+		// and use the same checkpoint to enforce the deadline above.
 		if (i > 0 && i % 512 === 0) {
+			if (Date.now() > deadline) {
+				throw new Error(`pow: no solution for difficulty ${difficulty} within ${timeoutMs}ms`);
+			}
 			await new Promise((resolve) => setTimeout(resolve, 0));
 		}
 	}
@@ -108,6 +129,11 @@ export async function solvePowChallenge(challenge: string, difficulty: number): 
 export async function solvePowForConnect(wsUrl: string): Promise<string | null> {
 	const info = await getPowChallenge(wsUrl);
 	if (!info.required || !info.challenge || !info.difficulty) return null;
-	const solution = await solvePowChallenge(info.challenge, info.difficulty);
+	// Only surface the global loader once we know there's real brute-force
+	// work ahead — the (overwhelmingly common) disabled-relay fetch above
+	// stays silent so normal connects never flash a spinner.
+	const solution = await globalLoader.wrap('Verifying connection…', () =>
+		solvePowChallenge(info.challenge!, info.difficulty!)
+	);
 	return `${info.challenge}:${solution}`;
 }
