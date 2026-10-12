@@ -130,7 +130,7 @@ export class RelayClient {
 		}
 	}
 
-	sendControl(msg: { t: string; n?: number }) {
+	sendControl(msg: { t: string; n?: number; sub?: { endpoint: string } }) {
 		if (this.ws?.readyState === WebSocket.OPEN) {
 			this.ws.send(JSON.stringify(msg));
 		}

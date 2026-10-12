@@ -23,10 +23,26 @@ const (
 	CtrlSlot      = "slot"
 	CtrlPing      = "ping"
 	CtrlPong      = "pong"
+
+	// Client → server only; consumed by the relay, never forwarded.
+	CtrlPushSub   = "push_sub"
+	CtrlPushUnsub = "push_unsub"
 )
+
+// MaxPushControlBytes caps a push_sub frame; larger ones are ignored.
+const MaxPushControlBytes = 2048
 
 // Control is a small JSON control message. Never contains chat content.
 type Control struct {
 	Type string `json:"t"`
 	Slot *int   `json:"n,omitempty"`
+}
+
+// PushControl carries a browser PushSubscription. Only the endpoint is kept:
+// pushes are payload-free, so the subscription's encryption keys are unused.
+type PushControl struct {
+	Type string `json:"t"`
+	Sub  struct {
+		Endpoint string `json:"endpoint"`
+	} `json:"sub"`
 }

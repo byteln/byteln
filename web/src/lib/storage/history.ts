@@ -297,6 +297,17 @@ export async function setSoundEnabled(enabled: boolean): Promise<void> {
 	await setMetaEntry(SOUND_ENABLED_KEY, enabled ? '1' : '0');
 }
 
+const PUSH_ENABLED_KEY = 'pushEnabled';
+
+export async function getPushEnabled(): Promise<boolean> {
+	const row = await getMetaEntry(PUSH_ENABLED_KEY);
+	return row?.value !== '0';
+}
+
+export async function setPushEnabled(enabled: boolean): Promise<void> {
+	await setMetaEntry(PUSH_ENABLED_KEY, enabled ? '1' : '0');
+}
+
 const INTRO_SEEN_KEY = 'introSeen';
 
 export async function hasSeenIntro(): Promise<boolean> {

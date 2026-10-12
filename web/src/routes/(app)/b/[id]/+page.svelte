@@ -547,6 +547,7 @@
 
 	async function enableNotifications() {
 		notifyPerm = await ensureNotifyPermission();
+		if (notifyPerm === 'granted') connectionManager.syncPush();
 	}
 
 	async function openShare() {

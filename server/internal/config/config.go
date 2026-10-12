@@ -39,6 +39,14 @@ type Config struct {
 	// per-challenge state or effect on E2EE/PIN handling.
 	PowDifficultyBits int
 
+	// Content-free Web Push. When a frame is buffered for an absent peer that
+	// registered a push endpoint, the relay sends it an empty VAPID push.
+	// Endpoints live on the bucket in memory only and die with it.
+	PushEnabled     bool
+	VAPIDPrivateKey string // base64url P-256 scalar; generated at startup when empty
+	VAPIDSubject    string
+	PushMinInterval time.Duration
+
 	DirectoryURL  string
 	CORSOrigins   []string
 	CORSRefresh   time.Duration
@@ -66,6 +74,11 @@ func FromEnv() Config {
 		MaxBucketLifetime:      durationEnv("BYTELN_MAX_BUCKET_LIFETIME", 2*time.Hour),
 
 		PowDifficultyBits: intEnv("BYTELN_POW_DIFFICULTY", 0),
+
+		PushEnabled:     boolEnv("BYTELN_PUSH", true),
+		VAPIDPrivateKey: os.Getenv("BYTELN_VAPID_PRIVATE_KEY"),
+		VAPIDSubject:    getenv("BYTELN_VAPID_SUBJECT", "mailto:operator@byteln.invalid"),
+		PushMinInterval: durationEnv("BYTELN_PUSH_MIN_INTERVAL", 30*time.Second),
 
 		DirectoryURL:  getenv("BYTELN_DIRECTORY_URL", "https://raw.githubusercontent.com/byteln/byteln/main/directory/servers.json"),
 		CORSOrigins:   splitCSV(os.Getenv("BYTELN_CORS_ORIGINS")),

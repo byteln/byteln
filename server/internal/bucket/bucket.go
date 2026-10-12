@@ -42,6 +42,11 @@ type Peer struct {
 	// DroppedAt is set when the peer disconnects; empty while connected.
 	DroppedAt time.Time
 	Connected bool
+
+	// PushEndpoint is the seat's Web Push endpoint, if registered. Kept only
+	// in memory for the life of the seat.
+	PushEndpoint string
+	lastPush     time.Time
 }
 
 type Config struct {
@@ -350,6 +355,50 @@ func (r *Registry) BufferIfAlone(b *Bucket, fromSlot int, data []byte, binary bo
 		ExpiresAt: now.Add(r.cfg.BufferTTL),
 	})
 	return true
+}
+
+// SetPushEndpoint registers (or, with "", clears) a seat's push endpoint.
+func (r *Registry) SetPushEndpoint(b *Bucket, slot int, endpoint string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if slot < 0 || slot > 1 || b.Peers[slot] == nil {
+		return
+	}
+	b.Peers[slot].PushEndpoint = endpoint
+}
+
+// ClearPushEndpoint removes a seat's endpoint only if it is still the given
+// one, so a stale 410 cannot wipe a newer registration.
+func (r *Registry) ClearPushEndpoint(b *Bucket, slot int, endpoint string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if slot < 0 || slot > 1 || b.Peers[slot] == nil {
+		return
+	}
+	if b.Peers[slot].PushEndpoint == endpoint {
+		b.Peers[slot].PushEndpoint = ""
+	}
+}
+
+// TakePushTarget returns the endpoint to wake for an absent seat, or "" when
+// the seat is connected, has no endpoint, or was pushed within minInterval.
+// A returned endpoint counts as pushed.
+func (r *Registry) TakePushTarget(b *Bucket, toSlot int, minInterval time.Duration) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if toSlot < 0 || toSlot > 1 {
+		return ""
+	}
+	p := b.Peers[toSlot]
+	if p == nil || p.Connected || p.PushEndpoint == "" {
+		return ""
+	}
+	now := r.cfg.Now()
+	if !p.lastPush.IsZero() && now.Sub(p.lastPush) < minInterval {
+		return ""
+	}
+	p.lastPush = now
+	return p.PushEndpoint
 }
 
 func bufferBytes(b *Bucket) int {

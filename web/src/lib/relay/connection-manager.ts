@@ -49,6 +49,7 @@ import {
 	notifyPartnerJoined,
 	notifyPartnerMessage
 } from '$lib/notify';
+import { getPushEndpoint, unsubscribePush } from '$lib/push';
 import { RelayClient, type StatusHandler } from '$lib/relay/client';
 import { Pacer } from '$lib/relay/pacer';
 import { TransferEngine, type Transfer } from '$lib/relay/transfer';
@@ -936,7 +937,10 @@ class ConnectionManagerImpl {
 				this.onHeartbeatPong(bucketId);
 				return;
 			}
-			if (msg.t === 'slot' && typeof msg.n === 'number') r.runtime.slot = msg.n;
+			if (msg.t === 'slot' && typeof msg.n === 'number') {
+				r.runtime.slot = msg.n;
+				void this.registerPush(bucketId);
+			}
 			if (msg.t === 'peer_join') {
 				const wasPresent = r.runtime.peerPresent;
 				r.runtime.peerPresent = true;
@@ -1093,6 +1097,33 @@ class ConnectionManagerImpl {
 				}
 			});
 		}
+	}
+
+	/** Hand this seat's push endpoint to the relay so it can wake us while away. */
+	private async registerPush(bucketId: string): Promise<void> {
+		const room = this.rooms.get(bucketId);
+		if (!room?.client?.connected) return;
+		const res = await getPushEndpoint(room.relayUrl);
+		if (!res) return;
+		if (res.renewed) {
+			this.syncPush(bucketId);
+		}
+		this.rooms.get(bucketId)?.client?.sendControl({ t: 'push_sub', sub: res.endpoint });
+	}
+
+	/** Re-register push for every connected room (after permission or endpoint changes). */
+	syncPush(exceptBucketId?: string): void {
+		for (const [id, room] of this.rooms) {
+			if (id !== exceptBucketId && room.client?.connected) void this.registerPush(id);
+		}
+	}
+
+	/** Tell every relay to forget our endpoint, then drop the browser subscription. */
+	async disablePush(): Promise<void> {
+		for (const room of this.rooms.values()) {
+			room.client?.sendControl({ t: 'push_unsub' });
+		}
+		await unsubscribePush();
 	}
 
 	private async waitForRelay(bucketId: string, timeoutMs = 8000): Promise<boolean> {

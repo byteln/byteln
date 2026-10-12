@@ -312,3 +312,39 @@ func TestTouchUpdatesLastSeen(t *testing.T) {
 		t.Fatal("Touch should refresh idle timer and keep bucket alive")
 	}
 }
+
+func TestPushTargetOnlyForAbsentSeatAndRateLimited(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	reg := bucket.NewRegistry(testCfg(&now))
+	j0 := reg.Join("abc", "tokA", "sidA", "1.1.1.1", "connA")
+	reg.Join("abc", "tokB", "sidB", "2.2.2.2", "connB")
+	b := j0.Bucket
+	const ep = "https://fcm.googleapis.com/fcm/send/a"
+	reg.SetPushEndpoint(b, 0, ep)
+
+	if got := reg.TakePushTarget(b, 0, 30*time.Second); got != "" {
+		t.Fatalf("connected seat should not be pushed, got %q", got)
+	}
+	reg.Leave("abc", 0)
+	if got := reg.TakePushTarget(b, 0, 30*time.Second); got != ep {
+		t.Fatalf("absent seat: got %q", got)
+	}
+	now = now.Add(10 * time.Second)
+	if got := reg.TakePushTarget(b, 0, 30*time.Second); got != "" {
+		t.Fatalf("rate limit: got %q", got)
+	}
+	now = now.Add(25 * time.Second)
+	if got := reg.TakePushTarget(b, 0, 30*time.Second); got != ep {
+		t.Fatalf("after interval: got %q", got)
+	}
+
+	reg.ClearPushEndpoint(b, 0, "https://fcm.googleapis.com/fcm/send/stale")
+	if b.Peers[0].PushEndpoint != ep {
+		t.Fatal("stale clear wiped current endpoint")
+	}
+	reg.ClearPushEndpoint(b, 0, ep)
+	now = now.Add(time.Minute)
+	if got := reg.TakePushTarget(b, 0, 30*time.Second); got != "" {
+		t.Fatalf("cleared endpoint: got %q", got)
+	}
+}

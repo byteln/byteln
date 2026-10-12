@@ -11,10 +11,30 @@ By default `bytelnd` keeps **only in-memory** state:
 - Peer connection objects
 - Optional short RAM buffer of ciphertext when one peer is alone (TTL, default 60s)
 - Transient connection metadata needed for rate limits (IP → create/bucket counters)
+- Optional Web Push endpoint per seat (bucket lifetime; see below)
 
 **Nothing is written to disk** by the binary. If you put a reverse proxy or OS audit log in front, that is your choice — document it for your users.
 
 Recommended: do **not** log WebSocket payloads. If you log connections, prefer coarse metrics (counts, durations) over full IP retention; if you retain IPs, publish a retention window (e.g. 24–72h) and stick to it.
+
+## Web Push
+
+When a client opts in, it sends its browser push endpoint to the relay over the bucket's WebSocket (`push_sub` control frame). When a frame is buffered for that seat while it is disconnected, the relay POSTs an **empty** push (no payload) to the endpoint, authenticated with VAPID. The client's service worker shows a generic "New message in a chat" notice; it cannot decrypt anything.
+
+Metadata tradeoff, for your users:
+
+- The relay holds the push endpoint in memory for the life of the bucket. The endpoint URL is an opaque token issued by the browser vendor (Google FCM, Mozilla, Apple, Microsoft).
+- The relay makes outbound HTTPS requests to those push services, so they learn that *some* server pinged that browser, and when.
+- Endpoints are only accepted on the known push-service hosts (no arbitrary URLs).
+
+| Env | Default | Meaning |
+|---|---|---|
+| `BYTELN_PUSH` | `true` | Enable push. When off, `GET /push-key` returns `{"enabled":false}` and `push_sub` is ignored. |
+| `BYTELN_VAPID_PRIVATE_KEY` | generated at startup | base64url P-256 private scalar. Subscriptions are in-memory anyway, so a fresh key per restart is fine; clients re-subscribe automatically. |
+| `BYTELN_VAPID_SUBJECT` | `mailto:operator@byteln.invalid` | Contact URI sent to push services; set a real `mailto:` or `https:` contact (Apple may reject placeholders). |
+| `BYTELN_PUSH_MIN_INTERVAL` | `30s` | At most one push per seat per interval. |
+
+Pushes expire at the push service after `BYTELN_BUFFER_TTL`, since the buffered ciphertext would be gone by then. Expose `/push-key` through your reverse proxy alongside `/health`.
 
 ## Legal / disclosure posture
 

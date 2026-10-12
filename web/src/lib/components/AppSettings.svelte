@@ -4,6 +4,9 @@
 	import { defaultRelayUrl, loadDirectory, pingServer, type DirectoryServer } from '$lib/servers/directory';
 	import { resolveRelayUrl, setRelayUrl } from '$lib/storage/history';
 	import { isSoundEnabled, loadSoundPreference, playMessageSound, updateSoundEnabled } from '$lib/sound';
+	import { ensureNotifyPermission } from '$lib/notify';
+	import { isPushEnabled, loadPushPreference, pushSupported, updatePushEnabled } from '$lib/push';
+	import { connectionManager } from '$lib/relay/connection-manager';
 	import { onMount } from 'svelte';
 
 	type Props = {
@@ -17,6 +20,8 @@
 	let servers = $state<DirectoryServer[]>([]);
 	let health = $state<Record<string, boolean | null>>({});
 	let soundOn = $state(isSoundEnabled());
+	let pushOn = $state(isPushEnabled());
+	let pushAvailable = $state(false);
 
 	const selectedServer = $derived(
 		servers.find((s) => s.url.replace(/\/$/, '') === relay.trim().replace(/\/$/, ''))
@@ -25,6 +30,8 @@
 
 	onMount(() => {
 		void loadSoundPreference().then((on) => (soundOn = on));
+		pushAvailable = pushSupported();
+		void loadPushPreference().then((on) => (pushOn = on));
 		void (async () => {
 			const fallback = defaultRelayUrl(env.PUBLIC_DEFAULT_RELAY);
 			relay = await resolveRelayUrl(fallback);
@@ -69,6 +76,16 @@
 		await updateSoundEnabled(soundOn);
 		if (soundOn) setTimeout(playMessageSound, 50);
 	}
+
+	async function togglePush(e: Event) {
+		pushOn = (e.currentTarget as HTMLInputElement).checked;
+		await updatePushEnabled(pushOn);
+		if (!pushOn) {
+			await connectionManager.disablePush();
+			return;
+		}
+		if ((await ensureNotifyPermission()) === 'granted') connectionManager.syncPush();
+	}
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -96,6 +113,13 @@
 					<input type="checkbox" checked={soundOn} onchange={toggleSound} />
 					<span>Play a sound when a message arrives</span>
 				</label>
+
+				{#if pushAvailable}
+					<label class="toggle-row">
+						<input type="checkbox" checked={pushOn} onchange={togglePush} />
+						<span>Background push via relay (no message content)</span>
+					</label>
+				{/if}
 
 				<section class="relay-section" aria-label="Relay server">
 					<label class="list-label" for="settings-relay">Relay URL</label>

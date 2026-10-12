@@ -18,6 +18,7 @@ import (
 	"github.com/byteln/byteln/server/internal/config"
 	"github.com/byteln/byteln/server/internal/cors"
 	"github.com/byteln/byteln/server/internal/protocol"
+	"github.com/byteln/byteln/server/internal/push"
 	"github.com/byteln/byteln/server/internal/ratelimit"
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
@@ -40,6 +41,9 @@ type Server struct {
 	// Generated once at startup; never persisted, never derived from any
 	// client-supplied or room-related value.
 	powSecret []byte
+
+	// push is nil when Web Push is disabled.
+	push *push.Sender
 
 	mu    sync.Mutex
 	peers map[*Peer]struct{}
@@ -114,6 +118,13 @@ func New(cfg config.Config) (*Server, error) {
 		done:      make(chan struct{}),
 		peers:     make(map[*Peer]struct{}),
 		powSecret: powSecret,
+	}
+	if cfg.PushEnabled {
+		v, err := push.NewVAPID(cfg.VAPIDPrivateKey, cfg.VAPIDSubject)
+		if err != nil {
+			return nil, err
+		}
+		s.push = push.NewSender(v, cfg.BufferTTL, 64)
 	}
 	// Async first-run refresh — start with embedded allowlist immediately.
 	go func() {
@@ -254,6 +265,17 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 	if method == "GET" && (path == "/pow-challenge" || path == "/pow-challenge/") {
 		s.writePowChallengeResponse(br, s.cors.CORSOrigin(origin))
+		_ = conn.Close()
+		return
+	}
+
+	if method == "OPTIONS" && (path == "/push-key" || path == "/push-key/") {
+		writeCORSPreflight(br, s.cors.CORSOrigin(origin))
+		_ = conn.Close()
+		return
+	}
+	if method == "GET" && (path == "/push-key" || path == "/push-key/") {
+		s.writePushKeyResponse(br, s.cors.CORSOrigin(origin))
 		_ = conn.Close()
 		return
 	}
@@ -459,6 +481,10 @@ func (s *Server) readPeer(p *Peer) {
 					s.sendControl(p, protocol.Control{Type: protocol.CtrlPong})
 					continue
 				}
+				if ctrl.Type == protocol.CtrlPushSub || ctrl.Type == protocol.CtrlPushUnsub {
+					s.handlePushControl(p, ctrl.Type, data)
+					continue
+				}
 			}
 			if op != ws.OpBinary && op != ws.OpText {
 				continue
@@ -508,6 +534,7 @@ func (s *Server) readPeer(p *Peer) {
 			}
 
 			if s.reg.BufferIfAlone(b, p.slot, data, op == ws.OpBinary) {
+				s.wakeAbsentPeer(b, 1-p.slot)
 				continue
 			}
 			other := b.OtherConn(p.slot)
@@ -749,6 +776,55 @@ func (s *Server) writePowChallengeResponse(w io.Writer, allowOrigin string) {
 	challenge := s.issuePowChallenge()
 	body := fmt.Sprintf(`{"required":true,"challenge":%q,"difficulty":%d}`, challenge, s.cfg.PowDifficultyBits)
 	writeHTTP(w, 200, "application/json", body+"\n", allowOrigin)
+}
+
+func (s *Server) writePushKeyResponse(w io.Writer, allowOrigin string) {
+	if s.push == nil {
+		writeHTTP(w, 200, "application/json", `{"enabled":false}`+"\n", allowOrigin)
+		return
+	}
+	body := fmt.Sprintf(`{"enabled":true,"key":%q}`, s.push.PublicKey())
+	writeHTTP(w, 200, "application/json", body+"\n", allowOrigin)
+}
+
+// handlePushControl stores or clears the sender's push endpoint. Invalid or
+// oversized registrations are dropped silently, like other junk text frames.
+func (s *Server) handlePushControl(p *Peer, typ string, data []byte) {
+	if s.push == nil {
+		return
+	}
+	b := s.reg.Get(p.bucket)
+	if b == nil {
+		return
+	}
+	if typ == protocol.CtrlPushUnsub {
+		s.reg.SetPushEndpoint(b, p.slot, "")
+		return
+	}
+	if len(data) > protocol.MaxPushControlBytes {
+		return
+	}
+	var pc protocol.PushControl
+	if json.Unmarshal(data, &pc) != nil {
+		return
+	}
+	if s.push.ValidateEndpoint(pc.Sub.Endpoint) != nil {
+		return
+	}
+	s.reg.SetPushEndpoint(b, p.slot, pc.Sub.Endpoint)
+}
+
+// wakeAbsentPeer sends a content-free push to a disconnected seat that has a
+// registered endpoint, at most once per PushMinInterval.
+func (s *Server) wakeAbsentPeer(b *bucket.Bucket, slot int) {
+	if s.push == nil {
+		return
+	}
+	ep := s.reg.TakePushTarget(b, slot, s.cfg.PushMinInterval)
+	if ep == "" {
+		return
+	}
+	s.push.Send(ep, func() { s.reg.ClearPushEndpoint(b, slot, ep) })
 }
 
 func writeCORSPreflight(w io.Writer, allowOrigin string) {

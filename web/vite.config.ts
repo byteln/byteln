@@ -25,6 +25,9 @@ export default defineConfig({
 				adapterFallback: 'index.html',
 				spa: true
 			},
+			workbox: {
+				importScripts: ['/push-sw.js']
+			},
 			manifest: {
 				name: 'byteln',
 				short_name: 'byteln',

@@ -46,6 +46,8 @@ docker compose up --build
 
 Relay defaults to `wss://byteln.com` in production. On `localhost` / `127.0.0.1`, the UI also lists **Local Dev Relay** (`ws://127.0.0.1:8990`) and prefers that. Override with `BYTELN_PORT` / `BYTELN_LISTEN` or `PUBLIC_DEFAULT_RELAY`.
 
+Web Push (content-free, opt-in): when a peer is away, the relay sends an empty push to their browser so the PWA can show "New message in a chat". Endpoints live in memory for the bucket's lifetime only. Env: `BYTELN_PUSH`, `BYTELN_VAPID_PRIVATE_KEY`, `BYTELN_VAPID_SUBJECT`, `BYTELN_PUSH_MIN_INTERVAL` — see [`docs/operator.md`](docs/operator.md#web-push).
+
 CORS allowlist (in-memory): see [`docs/operator.md`](docs/operator.md). Env: `BYTELN_DIRECTORY_URL`, `BYTELN_CORS_ORIGINS`, `BYTELN_CORS_REFRESH`, `BYTELN_CHECK_WS_ORIGIN`.
 
 ## Self-host
@@ -59,11 +61,13 @@ See [`docs/operator.md`](docs/operator.md) for acceptable-use and metadata notes
 ## Protocol sketch
 
 - `GET /health` → JSON status
+- `GET /push-key` → `{"enabled":true,"key":"<VAPID public key>"}`
 - `WS /bucket/{id}?token={session}` → join/create; token reclaim within 30s
 - Room PIN (`pv` in URL hash) gates the client locally; relay tokens are derived from key+PIN+seat
 - Close code `4001` → bucket full
 - Binary frames → opaque ciphertext (relayed)
 - Text frames from server → control (`peer_join` / `peer_leave` / `slot`)
+- Text frames from client `push_sub` / `push_unsub` → consumed by the relay, never forwarded
 
 ## Release
 
