@@ -3,6 +3,7 @@
 	import { page } from '$app/state';
 	import AppSettings from '$lib/components/AppSettings.svelte';
 	import ChatListSidePanel from '$lib/components/ChatListSidePanel.svelte';
+	import ConversationTabs from '$lib/components/ConversationTabs.svelte';
 	import { APP_NAME } from '$lib/brand';
 	import { startSecureLine } from '$lib/rooms/start-line';
 	import { roomsRevision } from '$lib/stores/conversations';
@@ -39,7 +40,7 @@
 				return;
 			}
 
-			if (rooms.length > 0) {
+			if (rooms.length > 0 && page.url.searchParams.get('list') !== '1') {
 				const latest = rooms[0];
 				if (latest) {
 					await goto(`/b/${latest.bucketId}${latest.roomHash || ''}`);
@@ -87,8 +88,13 @@
 				<header>
 					<span class="brand">{APP_NAME}</span>
 					<div class="presence">
-						<span class="presence-title">Get started</span>
-						<span class="presence-hint">Create a line or import history from settings.</span>
+						{#if rooms.length}
+							<span class="presence-title">Your chats</span>
+							<span class="presence-hint">Pick a chat to open it.</span>
+						{:else}
+							<span class="presence-title">Get started</span>
+							<span class="presence-hint">Create a line or import history from settings.</span>
+						{/if}
 					</div>
 					<button
 						type="button"
@@ -113,18 +119,34 @@
 					</button>
 				</header>
 
-				<div class="empty-pane">
-					<p class="empty-title">No secure lines yet</p>
-					<p class="empty-lede">
-						Start a new line to get a link and PIN for your partner. Import is in settings if you
-						have a backup.
-					</p>
-					<button type="button" class="primary" disabled={busy} onclick={() => void newLine()}>
-						{busy ? 'Opening…' : 'New secure line'}
-					</button>
-					<a class="ghost" href="/handoff">Open a chat from my phone</a>
-					<button type="button" class="ghost" onclick={() => (settingsOpen = true)}>Settings</button>
-				</div>
+				{#if rooms.length}
+					<div class="list-pane">
+						<ConversationTabs variant="sheet" />
+						<div class="list-actions">
+							<button type="button" class="primary" disabled={busy} onclick={() => void newLine()}>
+								{busy ? 'Opening…' : 'New secure line'}
+							</button>
+							<a class="ghost" href="/handoff">Open a chat from my phone</a>
+						</div>
+					</div>
+					<div class="empty-pane wide-only">
+						<p class="empty-lede">Pick a chat from the list.</p>
+						<a class="ghost" href="/handoff">Open a chat from my phone</a>
+					</div>
+				{:else}
+					<div class="empty-pane">
+						<p class="empty-title">No secure lines yet</p>
+						<p class="empty-lede">
+							Start a new line to get a link and PIN for your partner. Import is in settings if
+							you have a backup.
+						</p>
+						<button type="button" class="primary" disabled={busy} onclick={() => void newLine()}>
+							{busy ? 'Opening…' : 'New secure line'}
+						</button>
+						<a class="ghost" href="/handoff">Open a chat from my phone</a>
+						<button type="button" class="ghost" onclick={() => (settingsOpen = true)}>Settings</button>
+					</div>
+				{/if}
 			</div>
 		</div>
 	</main>
@@ -259,6 +281,39 @@
 		gap: 0.75rem;
 		text-align: center;
 		padding: 1.5rem;
+	}
+
+	.list-pane {
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+		-webkit-overflow-scrolling: touch;
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+		padding-bottom: 1.25rem;
+	}
+
+	.list-actions {
+		display: flex;
+		flex-direction: column;
+		align-items: stretch;
+		gap: 0.6rem;
+		text-align: center;
+	}
+
+	.wide-only {
+		display: none;
+	}
+
+	@media (min-width: 720px) {
+		.list-pane {
+			display: none;
+		}
+
+		.wide-only {
+			display: flex;
+		}
 	}
 
 	.empty-title {

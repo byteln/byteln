@@ -155,7 +155,7 @@
 </svelte:head>
 
 <main class="handoff">
-	<a href="/app" class="back">{APP_NAME}</a>
+	<a href="/app?list=1" class="back">← Your chats</a>
 
 	{#if mode === 'receive'}
 		<h1>Open a chat from your phone</h1>
@@ -256,8 +256,9 @@
 	}
 
 	.back {
-		font-family: var(--font-display);
-		font-weight: 700;
+		align-self: flex-start;
+		font-weight: 600;
+		font-size: 0.9rem;
 		text-decoration: none;
 	}
 

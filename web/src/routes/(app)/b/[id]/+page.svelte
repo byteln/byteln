@@ -419,6 +419,15 @@
 				error = 'Missing #key= in the URL. Ask the creator for the full share link.';
 				return;
 			}
+			if (parsed.seat === null && !parsed.legacy) {
+				const own = await getRoom(id);
+				if (gen !== bootGen) return;
+				if (own?.isCreator) {
+					error =
+						'This is the invite link for a chat you created in this browser. Open it in a different browser or a private window to join as your partner.';
+					return;
+				}
+			}
 			room = parsed;
 			key = await importKeyRaw(parsed.keyRaw);
 			if (gen !== bootGen) return;
