@@ -217,6 +217,7 @@ export function clearRoomSessionStorage(bucketId: string): void {
 	try {
 		sessionStorage.removeItem(`byteln:token:${bucketId}`);
 		sessionStorage.removeItem(`byteln:pin-once:${bucketId}`);
+		sessionStorage.removeItem(`byteln:join-pin:${bucketId}`);
 	} catch {
 		/* private mode */
 	}

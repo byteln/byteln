@@ -173,6 +173,9 @@
 				<button type="button" class="inline-btn" onclick={() => void copyShareAndPin()}>
 					{copied === 'both' ? 'Copied' : 'Copy link + PIN'}
 				</button>
+				<a class="inline-btn" href="/handoff?scan=1&send={encodeURIComponent(bucketId)}">
+					Send to my laptop
+				</a>
 			</div>
 		{:else if needsAppPin}
 			<p class="hint">Enter your app PIN to reveal the saved room PIN for this chat.</p>
@@ -281,6 +284,7 @@
 		color: var(--accent);
 		border-radius: 0.3rem;
 		padding: 0.35rem 0.6rem;
+		text-decoration: none;
 	}
 
 	.inline-btn.primary {

@@ -4,9 +4,16 @@
 	type Props = {
 		value: string;
 		compact?: boolean;
+		caption?: string;
+		label?: string;
 	};
 
-	let { value, compact = false }: Props = $props();
+	let {
+		value,
+		compact = false,
+		caption,
+		label = 'QR code for the share link. The room PIN is not included.'
+	}: Props = $props();
 
 	const qr = $derived(value ? encode(value, { ecc: 'M', boostEcc: true, border: 4 }) : null);
 
@@ -29,14 +36,16 @@
 		<svg
 			viewBox="0 0 {qr.size} {qr.size}"
 			role="img"
-			aria-label="QR code for the share link. The room PIN is not included."
+			aria-label={label}
 			shape-rendering="crispEdges"
 		>
 			<rect width={qr.size} height={qr.size} fill="#fff" />
 			<path d={modules} fill="#090B0D" />
 		</svg>
 		<figcaption>
-			{#if compact}
+			{#if caption}
+				{caption}
+			{:else if compact}
 				Scan to open the link — PIN stays separate.
 			{:else}
 				Hold this up if you're face to face. They scan the link, then type the PIN.

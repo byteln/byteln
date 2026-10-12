@@ -194,3 +194,25 @@ export function takeCreatorPin(bucketId: string): string | null {
 		return null;
 	}
 }
+
+const JOIN_PIN_PREFIX = 'byteln:join-pin:';
+
+/** PIN received from another of your devices — used once to join without typing it. */
+export function stashJoinPin(bucketId: string, pin: string): void {
+	try {
+		sessionStorage.setItem(`${JOIN_PIN_PREFIX}${bucketId}`, pin);
+	} catch {
+		/* private mode */
+	}
+}
+
+export function takeJoinPin(bucketId: string): string | null {
+	try {
+		const key = `${JOIN_PIN_PREFIX}${bucketId}`;
+		const pin = sessionStorage.getItem(key);
+		if (pin) sessionStorage.removeItem(key);
+		return pin;
+	} catch {
+		return null;
+	}
+}

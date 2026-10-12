@@ -89,6 +89,7 @@
 			</header>
 
 			<div class="settings-body">
+				<a class="import-link" href="/handoff" onclick={onClose}>Link a device (scan from phone)</a>
 				<a class="import-link" href="/import" onclick={onClose}>Import history</a>
 
 				<label class="toggle-row">

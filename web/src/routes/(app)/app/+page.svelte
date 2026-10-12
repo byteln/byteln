@@ -122,6 +122,7 @@
 					<button type="button" class="primary" disabled={busy} onclick={() => void newLine()}>
 						{busy ? 'Opening…' : 'New secure line'}
 					</button>
+					<a class="ghost" href="/handoff">Open a chat from my phone</a>
 					<button type="button" class="ghost" onclick={() => (settingsOpen = true)}>Settings</button>
 				</div>
 			</div>
@@ -299,5 +300,6 @@
 		background: transparent;
 		color: var(--accent);
 		font-weight: 600;
+		text-decoration: none;
 	}
 </style>

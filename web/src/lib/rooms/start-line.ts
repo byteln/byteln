@@ -12,8 +12,11 @@ import { connectionManager } from '$lib/relay/connection-manager';
 import { defaultRelayUrl } from '$lib/servers/directory';
 import { defaultNickname, resolveRelayUrl, setRelayUrl } from '$lib/storage/history';
 
-/** Create a new secure line and navigate to its share/chat screen. */
-export async function startSecureLine(relayUrl?: string): Promise<string> {
+/** Create and register a new secure line (seat 0) without navigating. */
+export async function createSecureLine(
+	relayUrl?: string,
+	nickname?: string
+): Promise<{ id: string; hash: string; pin: string }> {
 	const fallback = defaultRelayUrl(env.PUBLIC_DEFAULT_RELAY);
 	const relay = (relayUrl?.trim() || (await resolveRelayUrl(fallback))).trim();
 	if (relay) await setRelayUrl(relay);
@@ -25,15 +28,21 @@ export async function startSecureLine(relayUrl?: string): Promise<string> {
 	const salt = generatePinSalt();
 	const pv = await createPinVerifier(pin, salt, id);
 	const hash = buildRoomHash({ keyRaw: raw, pv, salt, seat: 0 });
-	stashCreatorPin(id, pin);
 	await connectionManager.registerRoom({
 		bucketId: id,
 		roomHash: hash,
 		relayUrl: relay,
 		roomPin: pin,
-		nickname: defaultNickname(id),
+		nickname: nickname ?? defaultNickname(id),
 		isCreator: true
 	});
+	return { id, hash, pin };
+}
+
+/** Create a new secure line and navigate to its share/chat screen. */
+export async function startSecureLine(relayUrl?: string): Promise<string> {
+	const { id, hash, pin } = await createSecureLine(relayUrl);
+	stashCreatorPin(id, pin);
 	await goto(`/b/${id}${hash}`);
 	return id;
 }

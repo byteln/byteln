@@ -20,6 +20,7 @@
 		sanitizeRoomFragmentInput,
 		shareRoomHash,
 		takeCreatorPin,
+		takeJoinPin,
 		type RoomFragment
 	} from '$lib/crypto/room';
 	import {
@@ -485,8 +486,11 @@
 
 			await ensureRoomRegistered(parsed);
 			if (gen !== bootGen) return;
-			if (pinHint && /^\d{6}$/.test(pinHint)) {
-				await connectWithPin(pinHint);
+			const autoPin = pinHint ?? takeJoinPin(id);
+			if (autoPin && /^\d{6}$/.test(autoPin)) {
+				pinInput = autoPin;
+				await connectWithPin(autoPin);
+				if (gen === bootGen && phase === 'loading') phase = 'line_pin';
 				return;
 			}
 			phase = 'line_pin';
