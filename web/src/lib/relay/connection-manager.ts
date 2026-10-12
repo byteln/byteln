@@ -34,14 +34,13 @@ import {
 	decryptMessage,
 	encryptMessage,
 	importKeyRaw,
+	isValidMime,
+	MAX_TRANSFER_BYTES,
 	messagePreview,
 	randomToken,
+	sanitizeFileName,
 	splitHistoryChunks,
-	splitImageChunks,
 	type HistoryChunkPlainMessage,
-	type ImageChunkPlainMessage,
-	type ImageMime,
-	type ImagePlainMessage,
 	type PlainMessage,
 	type ReplyRef
 } from '$lib/crypto/session';
@@ -51,12 +50,16 @@ import {
 	notifyPartnerMessage
 } from '$lib/notify';
 import { RelayClient, type StatusHandler } from '$lib/relay/client';
+import { Pacer } from '$lib/relay/pacer';
+import { TransferEngine, type Transfer } from '$lib/relay/transfer';
+import { initSound, playMessageSound } from '$lib/sound';
 import { bumpRooms } from '$lib/stores/conversations';
 import {
 	addMessage,
 	defaultNickname,
 	deleteMessage,
 	getRoom,
+	getPendingOutgoing,
 	getSessionToken,
 	deleteMessagesForBucket,
 	listMessages,
@@ -69,6 +72,7 @@ import {
 	clearRoomSessionStorage,
 	setSeatReleased,
 	setLastPeerDeviceFp,
+	setPendingOutgoing,
 	setSessionToken,
 	touchRoom,
 	upsertRoom,
@@ -111,19 +115,9 @@ export const activeBucketId = writable<string | null>(null);
 export const roomRuntimes = writable<Record<string, RoomRuntime>>({});
 export const messagesByBucket = writable<Record<string, StoredMessage[]>>({});
 
-export type ImageTransfer = {
-	id: string;
-	direction: 'send' | 'recv';
-	progress: number;
-	mime?: ImageMime;
-	w?: number;
-	h?: number;
-	from: 'self' | 'peer';
-	replyTo?: ReplyRef;
-	ts: number;
-};
+export type { Transfer } from '$lib/relay/transfer';
 
-export const imageTransfersByBucket = writable<Record<string, ImageTransfer[]>>({});
+export const transfersByBucket = writable<Record<string, Transfer[]>>({});
 
 export type ResyncStatus = {
 	phase: 'idle' | 'waiting' | 'transferring' | 'done' | 'error';
@@ -146,24 +140,9 @@ export type ResyncPrompt = {
 export const resyncPromptByBucket = writable<Record<string, ResyncPrompt | null>>({});
 export const resyncStatusByBucket = writable<Record<string, ResyncStatus>>({});
 
-const IMAGE_TRANSFER_TTL_MS = 2 * 60 * 1000;
 const RESYNC_TTL_MS = 2 * 60 * 1000;
 const BUFFERED_AMOUNT_LOW = 64 * 1024;
 const DIGEST_DEBOUNCE_MS = 300;
-
-type PendingImage = {
-	id: string;
-	total: number;
-	byteLength: number;
-	mime: ImageMime;
-	ts: number;
-	w?: number;
-	h?: number;
-	replyTo?: ReplyRef;
-	parts: (Uint8Array | null)[];
-	receivedBytes: number;
-	updatedAt: number;
-};
 
 type PendingHistory = {
 	requestId: string;
@@ -194,8 +173,32 @@ class ConnectionManagerImpl {
 	private suppressReconnect = new Set<string>();
 	private appLocked = false;
 	private lifecycleInitialized = false;
-	/** In-flight receive reassembly keyed by bucket → message id. */
-	private pendingImages = new Map<string, Map<string, PendingImage>>();
+	private pacers = new Map<string, Pacer>();
+	private transfers = new TransferEngine({
+		send: (bucketId, msg) => this.sendPaced(bucketId, msg),
+		canSend: (bucketId) => {
+			const room = this.rooms.get(bucketId);
+			return !!room?.client?.connected && room.runtime.peerPresent;
+		},
+		hasMessage: (bucketId, id) => this.getMessages(bucketId).some((m) => m.id === id),
+		deliver: (bucketId, msg) => this.deliverIncoming(bucketId, msg),
+		publish: (bucketId, list) => this.setTransfers(bucketId, list),
+		persistPending: (bucketId, ids) => {
+			void setPendingOutgoing(bucketId, ids).catch((e) =>
+				console.warn('byteln: could not persist pending transfers', e)
+			);
+		},
+		onDelivered: (bucketId) => this.schedulePublishDigest(bucketId),
+		hasStorageFor: async (bytes) => {
+			try {
+				const est = await navigator.storage?.estimate?.();
+				if (!est?.quota || est.usage === undefined) return true;
+				return est.quota - est.usage > bytes * 2;
+			} catch {
+				return true;
+			}
+		}
+	});
 	private pendingHistory = new Map<string, PendingHistory>();
 	private resyncSessions = new Map<string, ResyncSession>();
 	private peerDigests = new Map<string, { count: number; idHash: string }>();
@@ -220,8 +223,8 @@ class ConnectionManagerImpl {
 		};
 	}
 
-	private setTransfers(bucketId: string, transfers: ImageTransfer[]) {
-		imageTransfersByBucket.update((m) => {
+	private setTransfers(bucketId: string, transfers: Transfer[]) {
+		transfersByBucket.update((m) => {
 			if (transfers.length === 0) {
 				const next = { ...m };
 				delete next[bucketId];
@@ -231,27 +234,30 @@ class ConnectionManagerImpl {
 		});
 	}
 
-	private getTransfers(bucketId: string): ImageTransfer[] {
-		return get(imageTransfersByBucket)[bucketId] ?? [];
+	private pacerFor(bucketId: string): Pacer {
+		let pacer = this.pacers.get(bucketId);
+		if (!pacer) {
+			pacer = new Pacer();
+			this.pacers.set(bucketId, pacer);
+		}
+		return pacer;
 	}
 
-	private upsertTransfer(bucketId: string, transfer: ImageTransfer) {
-		const prev = this.getTransfers(bucketId);
-		const i = prev.findIndex((t) => t.id === transfer.id && t.direction === transfer.direction);
-		const next =
-			i >= 0 ? prev.map((t, idx) => (idx === i ? transfer : t)) : [...prev, transfer];
-		this.setTransfers(bucketId, next);
-	}
-
-	private removeTransfer(bucketId: string, id: string, direction?: ImageTransfer['direction']) {
-		const next = this.getTransfers(bucketId).filter(
-			(t) => !(t.id === id && (direction === undefined || t.direction === direction))
-		);
-		this.setTransfers(bucketId, next);
+	/** Encrypt and send under the per-connection pacer (bulk + transfer control traffic). */
+	private async sendPaced(bucketId: string, msg: PlainMessage): Promise<boolean> {
+		const room = this.rooms.get(bucketId);
+		if (!room?.client?.connected) return false;
+		const buf = await encryptMessage(room.key, msg);
+		await this.pacerFor(bucketId).take(buf.byteLength);
+		const client = this.rooms.get(bucketId)?.client;
+		if (!client?.connected) return false;
+		client.sendBinary(buf);
+		return this.waitForBufferedAmountLow(client);
 	}
 
 	private clearTransfersForBucket(bucketId: string) {
-		this.pendingImages.delete(bucketId);
+		this.transfers.clearBucket(bucketId);
+		this.pacers.delete(bucketId);
 		const session = this.resyncSessions.get(bucketId);
 		if (session) {
 			this.pendingHistory.delete(`${session.requestId}:requester`);
@@ -266,7 +272,6 @@ class ConnectionManagerImpl {
 			clearTimeout(digTimer);
 			this.digestTimers.delete(bucketId);
 		}
-		this.setTransfers(bucketId, []);
 		historyMismatchByBucket.update((m) => {
 			const next = { ...m };
 			delete next[bucketId];
@@ -284,19 +289,6 @@ class ConnectionManagerImpl {
 		});
 	}
 
-	private sweepPendingImages(bucketId: string) {
-		const map = this.pendingImages.get(bucketId);
-		if (!map) return;
-		const now = Date.now();
-		for (const [id, pending] of map) {
-			if (now - pending.updatedAt > IMAGE_TRANSFER_TTL_MS) {
-				map.delete(id);
-				this.removeTransfer(bucketId, id, 'recv');
-			}
-		}
-		if (map.size === 0) this.pendingImages.delete(bucketId);
-	}
-
 	private async waitForBufferedAmountLow(client: RelayClient): Promise<boolean> {
 		while (client.connected && client.bufferedAmount > BUFFERED_AMOUNT_LOW) {
 			await new Promise((r) => setTimeout(r, 16));
@@ -307,6 +299,7 @@ class ConnectionManagerImpl {
 	private initLifecycleHooks() {
 		if (this.lifecycleInitialized || typeof window === 'undefined') return;
 		this.lifecycleInitialized = true;
+		initSound();
 		browserOffline.set(!navigator.onLine);
 		document.addEventListener('visibilitychange', () => {
 			if (document.visibilityState === 'visible') {
@@ -815,6 +808,7 @@ class ConnectionManagerImpl {
 		this.rooms.set(bucketId, internal);
 		this.creds.set(bucketId, creds);
 		this.syncRuntimes();
+		await this.resumePendingOutgoing(bucketId);
 
 		const token = await this.relayTokenForRoom(bucketId, internal);
 		if (!token) return false;
@@ -862,6 +856,42 @@ class ConnectionManagerImpl {
 		return this.openRoom(bucketId);
 	}
 
+	/** Re-offer attachments the peer never confirmed (e.g. this tab was reloaded mid-send). */
+	private async resumePendingOutgoing(bucketId: string): Promise<void> {
+		let ids: string[];
+		try {
+			ids = await getPendingOutgoing(bucketId);
+		} catch {
+			return;
+		}
+		if (ids.length === 0) return;
+		const byId = new Map(this.getMessages(bucketId).map((m) => [m.id, m]));
+		let resumed = 0;
+		for (const id of ids) {
+			const m = byId.get(id);
+			if (!m || m.from !== 'self' || m.type === 'text') continue;
+			try {
+				await this.transfers.startSend(
+					bucketId,
+					{
+						id,
+						kind: m.type,
+						ts: m.ts,
+						mime: m.mime,
+						data: m.data,
+						...(m.type === 'file' ? { name: m.name } : { w: m.w, h: m.h }),
+						...(m.replyTo ? { replyTo: m.replyTo } : {})
+					},
+					{ resume: true }
+				);
+				resumed++;
+			} catch (e) {
+				console.warn('byteln: could not resume transfer', id, e);
+			}
+		}
+		if (resumed === 0) await setPendingOutgoing(bucketId, []);
+	}
+
 	private wireClient(bucketId: string, client: RelayClient) {
 		const room = this.rooms.get(bucketId);
 		if (!room) return;
@@ -895,6 +925,8 @@ class ConnectionManagerImpl {
 				this.handleDisconnectForReconnect(bucketId);
 			}
 			this.syncRuntimes();
+			if (s === 'open') this.transfers.onConnected(bucketId);
+			else if (s === 'closed' || s === 'error') this.transfers.onDisconnected(bucketId);
 		}) satisfies StatusHandler;
 
 		client.onControl = (msg) => {
@@ -916,9 +948,13 @@ class ConnectionManagerImpl {
 				// Relay may emit peer_join on every forwarded frame — only digest on first sight.
 				if (!wasPresent) {
 					void this.publishDigest(bucketId);
+					this.transfers.onConnected(bucketId);
 				}
 			}
-			if (msg.t === 'peer_leave') r.runtime.peerPresent = false;
+			if (msg.t === 'peer_leave') {
+				r.runtime.peerPresent = false;
+				this.transfers.onDisconnected(bucketId);
+			}
 			this.syncRuntimes();
 		};
 
@@ -929,6 +965,7 @@ class ConnectionManagerImpl {
 				r.runtime.peerPresent = true;
 				this.syncRuntimes();
 				void this.publishDigest(bucketId);
+				this.transfers.onConnected(bucketId);
 			}
 			try {
 				const plain = await decryptMessage(r.key, buf);
@@ -937,8 +974,24 @@ class ConnectionManagerImpl {
 					this.schedulePublishDigest(bucketId);
 					return;
 				}
+				if (plain.type === 'xfer_chunk') {
+					await this.transfers.handleChunk(bucketId, plain);
+					return;
+				}
+				if (plain.type === 'xfer_ack') {
+					this.transfers.handleAck(bucketId, plain);
+					return;
+				}
+				if (plain.type === 'xfer_query') {
+					this.transfers.handleQuery(bucketId, plain.id);
+					return;
+				}
+				if (plain.type === 'xfer_cancel') {
+					this.transfers.handleCancel(bucketId, plain);
+					return;
+				}
 				if (plain.type === 'image_chunk') {
-					await this.handleImageChunk(bucketId, plain);
+					// Pre-xfer_chunk clients; no resend support, so not accepted.
 					return;
 				}
 				if (plain.type === 'history_digest') {
@@ -982,6 +1035,7 @@ class ConnectionManagerImpl {
 					from: 'peer'
 				};
 				if (!this.appendMessage(bucketId, stored)) return;
+				playMessageSound();
 				await addMessage(bucketId, stored);
 				this.schedulePublishDigest(bucketId);
 				const curFp = this.currentPeerDeviceFp.get(bucketId);
@@ -1015,114 +1069,12 @@ class ConnectionManagerImpl {
 		};
 	}
 
-	private async handleImageChunk(bucketId: string, chunk: ImageChunkPlainMessage): Promise<void> {
-		this.sweepPendingImages(bucketId);
-		let byId = this.pendingImages.get(bucketId);
-		if (!byId) {
-			byId = new Map();
-			this.pendingImages.set(bucketId, byId);
-		}
-
-		let pending = byId.get(chunk.id);
-		if (!pending) {
-			if (chunk.index !== 0) {
-				console.warn('byteln: image chunk before header', chunk.id, chunk.index);
-				return;
-			}
-			if (
-				typeof chunk.ts !== 'number' ||
-				!chunk.mime ||
-				typeof chunk.byteLength !== 'number'
-			) {
-				console.warn('byteln: invalid image chunk header', chunk.id);
-				return;
-			}
-			pending = {
-				id: chunk.id,
-				total: chunk.total,
-				byteLength: chunk.byteLength,
-				mime: chunk.mime,
-				ts: chunk.ts,
-				w: chunk.w,
-				h: chunk.h,
-				replyTo: chunk.replyTo,
-				parts: Array.from({ length: chunk.total }, () => null),
-				receivedBytes: 0,
-				updatedAt: Date.now()
-			};
-			byId.set(chunk.id, pending);
-		} else if (chunk.total !== pending.total) {
-			console.warn('byteln: image chunk total mismatch', chunk.id);
-			return;
-		}
-
-		if (chunk.index < 0 || chunk.index >= pending.total) return;
-		if (pending.parts[chunk.index]) return; // duplicate
-
-		pending.parts[chunk.index] = chunk.data;
-		pending.receivedBytes += chunk.data.byteLength;
-		pending.updatedAt = Date.now();
-
-		const progress =
-			pending.byteLength > 0
-				? Math.min(1, pending.receivedBytes / pending.byteLength)
-				: pending.parts.every((p) => p !== null)
-					? 1
-					: 0;
-
-		this.upsertTransfer(bucketId, {
-			id: pending.id,
-			direction: 'recv',
-			progress,
-			mime: pending.mime,
-			w: pending.w,
-			h: pending.h,
-			from: 'peer',
-			replyTo: pending.replyTo,
-			ts: pending.ts
-		});
-
-		const complete = pending.parts.every((p) => p !== null);
-		if (!complete) return;
-
-		const assembled = new Uint8Array(pending.byteLength);
-		let offset = 0;
-		for (const part of pending.parts) {
-			if (!part) return;
-			if (offset + part.byteLength > pending.byteLength) {
-				console.warn('byteln: image chunk overflow', chunk.id);
-				byId.delete(chunk.id);
-				this.removeTransfer(bucketId, chunk.id, 'recv');
-				return;
-			}
-			assembled.set(part, offset);
-			offset += part.byteLength;
-		}
-		if (offset !== pending.byteLength) {
-			console.warn('byteln: image assembled size mismatch', chunk.id);
-			byId.delete(chunk.id);
-			this.removeTransfer(bucketId, chunk.id, 'recv');
-			return;
-		}
-
-		byId.delete(chunk.id);
-		this.removeTransfer(bucketId, chunk.id, 'recv');
-
-		const stored: StoredMessage = {
-			v: 1,
-			ts: pending.ts,
-			type: 'image',
-			mime: pending.mime,
-			data: assembled,
-			id: pending.id,
-			from: 'peer'
-		};
-		if (typeof pending.w === 'number') stored.w = pending.w;
-		if (typeof pending.h === 'number') stored.h = pending.h;
-		if (pending.replyTo) stored.replyTo = pending.replyTo;
-
-		if (!this.appendMessage(bucketId, stored)) return;
+	/** Store a fully received + verified attachment from the peer. */
+	private async deliverIncoming(bucketId: string, stored: StoredMessage): Promise<void> {
 		await addMessage(bucketId, stored);
+		if (!this.appendMessage(bucketId, stored)) return;
+		playMessageSound();
+		this.schedulePublishDigest(bucketId);
 		const preview = messagePreview(stored);
 		await touchRoom(bucketId, preview);
 
@@ -1283,11 +1235,12 @@ class ConnectionManagerImpl {
 		activeBucketId.set(null);
 		roomRuntimes.set({});
 		messagesByBucket.set({});
-		imageTransfersByBucket.set({});
+		this.transfers.clearAll();
+		this.pacers.clear();
+		transfersByBucket.set({});
 		historyMismatchByBucket.set({});
 		resyncPromptByBucket.set({});
 		resyncStatusByBucket.set({});
-		this.pendingImages.clear();
 		this.pendingHistory.clear();
 		this.resyncSessions.clear();
 		this.peerDigests.clear();
@@ -1414,76 +1367,88 @@ class ConnectionManagerImpl {
 		const room = this.rooms.get(bucketId);
 		if (!room?.client?.connected) return false;
 
+		this.assertCanStartTransfer(bucketId);
+
 		const prepared = await prepareImage(file);
-		const id = uuidV7();
-		const plain: ImagePlainMessage & { id: string } = {
+		const stored: StoredMessage = {
 			v: 1,
 			ts: Date.now(),
 			type: 'image',
 			mime: prepared.mime,
 			data: prepared.data,
-			w: prepared.w,
-			h: prepared.h,
-			id
+			id: uuidV7(),
+			from: 'self'
 		};
-		if (opts?.replyTo) plain.replyTo = opts.replyTo;
+		if (prepared.w !== undefined) stored.w = prepared.w;
+		if (prepared.h !== undefined) stored.h = prepared.h;
+		if (opts?.replyTo) stored.replyTo = opts.replyTo;
+		await this.startOutgoing(bucketId, stored);
+		return true;
+	}
 
-		const stored: StoredMessage = { ...plain, id, from: 'self' };
-		this.appendMessage(bucketId, stored);
-		await addMessage(bucketId, stored);
-		await touchRoom(bucketId, messagePreview(plain));
-		bumpRooms();
+	/** Any file type up to 10 MiB; the receiver only ever offers it as a download. */
+	async sendFile(
+		bucketId: string,
+		file: File | Blob,
+		opts?: { replyTo?: ReplyRef }
+	): Promise<boolean> {
+		const room = this.rooms.get(bucketId);
+		if (!room?.client?.connected) return false;
+		if (file.size > MAX_TRANSFER_BYTES) throw new Error('File too large (max 10 MB)');
+		this.assertCanStartTransfer(bucketId);
 
-		this.upsertTransfer(bucketId, {
-			id,
-			direction: 'send',
-			progress: 0,
-			mime: plain.mime,
-			w: plain.w,
-			h: plain.h,
-			from: 'self',
-			replyTo: plain.replyTo,
-			ts: plain.ts
-		});
+		const data = new Uint8Array(await file.arrayBuffer());
+		if (data.byteLength > MAX_TRANSFER_BYTES) throw new Error('File too large (max 10 MB)');
+		const rawMime = (file.type || '').toLowerCase();
+		const stored: StoredMessage = {
+			v: 1,
+			ts: Date.now(),
+			type: 'file',
+			name: sanitizeFileName('name' in file ? file.name : ''),
+			mime: isValidMime(rawMime) ? rawMime : 'application/octet-stream',
+			data,
+			id: uuidV7(),
+			from: 'self'
+		};
+		if (opts?.replyTo) stored.replyTo = opts.replyTo;
+		await this.startOutgoing(bucketId, stored);
+		return true;
+	}
 
-		const chunks = splitImageChunks(plain);
-		const totalBytes = plain.data.byteLength;
-		let sentBytes = 0;
+	canStartTransfer(bucketId: string): boolean {
+		return this.transfers.canStartSend(bucketId);
+	}
 
-		try {
-			for (const chunk of chunks) {
-				if (!room.client?.connected) {
-					this.removeTransfer(bucketId, id, 'send');
-					return false;
-				}
-				const buf = await encryptMessage(room.key, chunk);
-				room.client.sendBinary(buf);
-				sentBytes += chunk.data.byteLength;
-				const progress = totalBytes > 0 ? Math.min(1, sentBytes / totalBytes) : 1;
-				this.upsertTransfer(bucketId, {
-					id,
-					direction: 'send',
-					progress,
-					mime: plain.mime,
-					w: plain.w,
-					h: plain.h,
-					from: 'self',
-					replyTo: plain.replyTo,
-					ts: plain.ts
-				});
-				if (!(await this.waitForBufferedAmountLow(room.client))) {
-					this.removeTransfer(bucketId, id, 'send');
-					return false;
-				}
-			}
-			this.removeTransfer(bucketId, id, 'send');
-			this.schedulePublishDigest(bucketId);
-			return true;
-		} catch (e) {
-			console.warn('byteln: image send failed', e);
-			this.removeTransfer(bucketId, id, 'send');
-			return false;
+	private assertCanStartTransfer(bucketId: string) {
+		if (!this.transfers.canStartSend(bucketId)) {
+			throw new Error('Wait for the current uploads to finish.');
 		}
+	}
+
+	private async startOutgoing(bucketId: string, stored: StoredMessage): Promise<void> {
+		if (stored.type === 'text') return;
+		await addMessage(bucketId, stored);
+		this.appendMessage(bucketId, stored);
+		await touchRoom(bucketId, messagePreview(stored));
+		bumpRooms();
+		await this.transfers.startSend(bucketId, {
+			id: stored.id,
+			kind: stored.type,
+			ts: stored.ts,
+			mime: stored.mime,
+			data: stored.data,
+			...(stored.type === 'file' ? { name: stored.name } : { w: stored.w, h: stored.h }),
+			...(stored.replyTo ? { replyTo: stored.replyTo } : {})
+		});
+	}
+
+	/** Retry a failed send, or ask the sender to resend a stalled receive. */
+	retryTransfer(bucketId: string, id: string): void {
+		this.transfers.retry(bucketId, id);
+	}
+
+	cancelTransfer(bucketId: string, id: string): void {
+		this.transfers.cancel(bucketId, id);
 	}
 
 	/** Delete for everyone: send encrypted delete signal, then remove locally. */
@@ -1504,9 +1469,7 @@ class ConnectionManagerImpl {
 	}
 
 	private async applyDelete(bucketId: string, messageId: string): Promise<void> {
-		const map = this.pendingImages.get(bucketId);
-		map?.delete(messageId);
-		this.removeTransfer(bucketId, messageId);
+		this.transfers.forget(bucketId, messageId);
 		const prev = get(messagesByBucket)[bucketId] ?? [];
 		const next = prev.filter((m) => m.id !== messageId);
 		if (next.length !== prev.length) {
@@ -1722,9 +1685,7 @@ class ConnectionManagerImpl {
 			const chunks = splitHistoryChunks(bundleId, compressed);
 			let sent = 0;
 			for (const chunk of chunks) {
-				if (!room.client?.connected) throw new Error('disconnected');
-				const buf = await encryptMessage(room.key, chunk);
-				room.client.sendBinary(buf);
+				if (!(await this.sendPaced(bucketId, chunk))) throw new Error('disconnected');
 				sent += chunk.data.byteLength;
 				const progress =
 					compressed.byteLength > 0 ? Math.min(1, sent / compressed.byteLength) : 1;
@@ -1734,9 +1695,6 @@ class ConnectionManagerImpl {
 					requestId,
 					detail: `Sending… ${Math.round(progress * 100)}%`
 				});
-				if (!(await this.waitForBufferedAmountLow(room.client))) {
-					throw new Error('disconnected');
-				}
 			}
 
 			if (onlyTheirs.length === 0) {
@@ -1851,8 +1809,7 @@ class ConnectionManagerImpl {
 	async wipeLocalHistory(bucketId: string): Promise<void> {
 		await deleteMessagesForBucket(bucketId);
 		this.syncMessages(bucketId, []);
-		this.pendingImages.delete(bucketId);
-		this.setTransfers(bucketId, []);
+		this.transfers.clearBucket(bucketId, { forgetPending: true });
 		resyncPromptByBucket.update((m) => {
 			const next = { ...m };
 			delete next[bucketId];

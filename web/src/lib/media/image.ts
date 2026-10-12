@@ -1,4 +1,4 @@
-/** Prepare images for E2E send (≤3 MiB). GIFs pass through; other oversized images JPEG-recompress. */
+/** Prepare images for E2E send (≤10 MiB). GIFs pass through; other oversized images JPEG-recompress. */
 
 import {
 	MAX_IMAGE_BYTES,
@@ -73,7 +73,7 @@ async function recompress(file: Blob): Promise<PreparedImage> {
 }
 
 /**
- * Pass through jpeg/png/webp/gif under 3 MiB.
+ * Pass through jpeg/png/webp/gif up to 10 MiB.
  * Oversized still images: resize + JPEG recompress. Oversized GIFs: reject (keeps animation).
  */
 export async function prepareImage(file: Blob): Promise<PreparedImage> {
@@ -92,7 +92,7 @@ export async function prepareImage(file: Blob): Promise<PreparedImage> {
 	}
 
 	if (mime === 'image/gif' || rawMime === 'image/gif') {
-		throw new Error('GIF too large (max 3 MiB)');
+		throw new Error('GIF too large (max 10 MB)');
 	}
 
 	if (!rawMime.startsWith('image/') && !mime) {

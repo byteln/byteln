@@ -3,6 +3,7 @@
 	import { env } from '$env/dynamic/public';
 	import { defaultRelayUrl, loadDirectory, pingServer, type DirectoryServer } from '$lib/servers/directory';
 	import { resolveRelayUrl, setRelayUrl } from '$lib/storage/history';
+	import { isSoundEnabled, loadSoundPreference, playMessageSound, updateSoundEnabled } from '$lib/sound';
 	import { onMount } from 'svelte';
 
 	type Props = {
@@ -15,6 +16,7 @@
 	let relay = $state('');
 	let servers = $state<DirectoryServer[]>([]);
 	let health = $state<Record<string, boolean | null>>({});
+	let soundOn = $state(isSoundEnabled());
 
 	const selectedServer = $derived(
 		servers.find((s) => s.url.replace(/\/$/, '') === relay.trim().replace(/\/$/, ''))
@@ -22,6 +24,7 @@
 	const relayHealth = $derived(health[relay.trim()] ?? null);
 
 	onMount(() => {
+		void loadSoundPreference().then((on) => (soundOn = on));
 		void (async () => {
 			const fallback = defaultRelayUrl(env.PUBLIC_DEFAULT_RELAY);
 			relay = await resolveRelayUrl(fallback);
@@ -60,6 +63,12 @@
 		relay = url;
 		await persistRelay();
 	}
+
+	async function toggleSound(e: Event) {
+		soundOn = (e.currentTarget as HTMLInputElement).checked;
+		await updateSoundEnabled(soundOn);
+		if (soundOn) setTimeout(playMessageSound, 50);
+	}
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -81,6 +90,11 @@
 
 			<div class="settings-body">
 				<a class="import-link" href="/import" onclick={onClose}>Import history</a>
+
+				<label class="toggle-row">
+					<input type="checkbox" checked={soundOn} onchange={toggleSound} />
+					<span>Play a sound when a message arrives</span>
+				</label>
 
 				<section class="relay-section" aria-label="Relay server">
 					<label class="list-label" for="settings-relay">Relay URL</label>
@@ -241,6 +255,20 @@
 		text-decoration: none;
 		font-weight: 600;
 		font-size: 0.92rem;
+	}
+
+	.toggle-row {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		font-size: 0.9rem;
+		cursor: pointer;
+	}
+
+	.toggle-row input {
+		width: 1.05rem;
+		height: 1.05rem;
+		accent-color: var(--accent);
 	}
 
 	.list-label {

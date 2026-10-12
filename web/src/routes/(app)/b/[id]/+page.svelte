@@ -6,6 +6,7 @@
 	import ChatListSheet from '$lib/components/ChatListSheet.svelte';
 	import ChatListSidePanel from '$lib/components/ChatListSidePanel.svelte';
 	import DeviceSettings from '$lib/components/DeviceSettings.svelte';
+	import FileBubble from '$lib/components/FileBubble.svelte';
 	import ImageBubble from '$lib/components/ImageBubble.svelte';
 	import ShareInviteModal from '$lib/components/ShareInviteModal.svelte';
 	import ShareQr from '$lib/components/ShareQr.svelte';
@@ -21,17 +22,23 @@
 		takeCreatorPin,
 		type RoomFragment
 	} from '$lib/crypto/room';
-	import { importKeyRaw, randomToken, replyPreview, type ReplyRef } from '$lib/crypto/session';
+	import {
+		importKeyRaw,
+		MAX_TRANSFER_BYTES,
+		randomToken,
+		replyPreview,
+		type ReplyRef
+	} from '$lib/crypto/session';
 	import {
 		browserOffline,
 		connectionManager,
 		historyMismatchByBucket,
-		imageTransfersByBucket,
 		messagesByBucket,
 		resyncPromptByBucket,
 		resyncStatusByBucket,
 		roomRuntimes,
-		type ImageTransfer
+		transfersByBucket,
+		type Transfer
 	} from '$lib/relay/connection-manager';
 	import {
 		ensureNotifyPermission,
@@ -106,23 +113,19 @@
 	let dropFlashTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const messages = $derived(($messagesByBucket[bucketId] ?? []) as StoredMessage[]);
-	const imageTransfers = $derived(($imageTransfersByBucket[bucketId] ?? []) as ImageTransfer[]);
-	const sendingImage = $derived(imageTransfers.some((t) => t.direction === 'send'));
-	const imageSending = $derived(sendingImage || imageBusy);
-	const sendImagePercent = $derived.by(() => {
-		const t = imageTransfers.find((x) => x.direction === 'send');
-		return t != null ? Math.round(Math.min(1, Math.max(0, t.progress)) * 100) : null;
-	});
-	const sendProgressById = $derived.by(() => {
-		const map = new Map<string, number>();
-		for (const t of imageTransfers) {
-			if (t.direction === 'send') map.set(t.id, t.progress);
+	const transfers = $derived(($transfersByBucket[bucketId] ?? []) as Transfer[]);
+	/** True only while an attachment is being read/prepared; uploads continue in the background. */
+	const imageSending = $derived(imageBusy);
+	const sendTransferById = $derived.by(() => {
+		const map = new Map<string, Transfer>();
+		for (const t of transfers) {
+			if (t.direction === 'send') map.set(t.id, t);
 		}
 		return map;
 	});
 	type TimelineItem =
 		| { kind: 'message'; message: StoredMessage }
-		| { kind: 'recv'; transfer: ImageTransfer };
+		| { kind: 'recv'; transfer: Transfer };
 	const timeline = $derived.by(() => {
 		const seen = new Set<string>();
 		const items: TimelineItem[] = [];
@@ -131,7 +134,7 @@
 			seen.add(m.id);
 			items.push({ kind: 'message', message: m });
 		}
-		for (const t of imageTransfers) {
+		for (const t of transfers) {
 			if (t.direction === 'recv' && !seen.has(t.id)) {
 				seen.add(t.id);
 				items.push({ kind: 'recv', transfer: t });
@@ -579,23 +582,49 @@
 		el.style.height = `${Math.min(el.scrollHeight, max)}px`;
 	}
 
-	async function sendImageFile(file: File | Blob) {
-		if (!key || connState !== 'open' || imageSending) return;
-		imageBusy = true;
-		imageError = '';
+	async function sendImageOrFile(file: File | Blob): Promise<boolean> {
+		const type = (file.type || '').toLowerCase();
+		// SVG can carry script, so it is only ever sent as a download.
+		if (!type.startsWith('image/') || type === 'image/svg+xml') {
+			return connectionManager.sendFile(bucketId, file, replyOpts());
+		}
 		try {
-			const ok = await connectionManager.sendImage(bucketId, file, replyOpts());
+			return await connectionManager.sendImage(bucketId, file, replyOpts());
+		} catch (e) {
+			// Images the browser cannot decode/re-encode (e.g. HEIC) still go as plain files.
+			if (file.size > MAX_TRANSFER_BYTES) throw e;
+			return connectionManager.sendFile(bucketId, file, replyOpts());
+		}
+	}
+
+	async function sendAttachment(file: File | Blob) {
+		if (!key || connState !== 'open' || imageSending) return;
+		imageError = '';
+		if (!connectionManager.canStartTransfer(bucketId)) {
+			imageError = 'Wait for the current uploads to finish.';
+			return;
+		}
+		imageBusy = true;
+		try {
+			const ok = await sendImageOrFile(file);
 			if (!ok) {
-				imageError = 'Could not send image.';
+				imageError = 'Could not send attachment.';
 				return;
 			}
 			clearReply();
 			queueMicrotask(() => scrollToBottom(true));
 		} catch (e) {
-			imageError = e instanceof Error ? e.message : 'Could not send image.';
+			imageError = e instanceof Error ? e.message : 'Could not send attachment.';
 		} finally {
 			imageBusy = false;
 		}
+	}
+
+	function transferStatusText(t: Transfer | undefined): string {
+		if (!t) return '';
+		if (t.status === 'failed') return t.detail ?? 'Failed';
+		if (t.status === 'waiting') return 'Waiting for partner…';
+		return t.direction === 'send' ? 'Sending…' : 'Receiving…';
 	}
 
 	async function send() {
@@ -611,11 +640,11 @@
 		});
 	}
 
-	function onPickImage(e: Event) {
+	function onPickFile(e: Event) {
 		const input = e.currentTarget as HTMLInputElement;
 		const file = input.files?.[0];
 		input.value = '';
-		if (file) void sendImageFile(file);
+		if (file) void sendAttachment(file);
 	}
 
 	function onPaste(e: ClipboardEvent) {
@@ -623,11 +652,11 @@
 		const items = e.clipboardData?.items;
 		if (!items) return;
 		for (const item of items) {
-			if (item.type.startsWith('image/')) {
+			if (item.kind === 'file') {
 				const file = item.getAsFile();
 				if (file) {
 					e.preventDefault();
-					void sendImageFile(file);
+					void sendAttachment(file);
 				}
 				return;
 			}
@@ -675,9 +704,9 @@
 		composerDragOver = false;
 		if (phase !== 'chat' || connState !== 'open' || imageSending) return;
 		const file = e.dataTransfer?.files?.[0];
-		if (file && file.type.startsWith('image/')) {
+		if (file) {
 			flashDrop();
-			void sendImageFile(file);
+			void sendAttachment(file);
 		}
 	}
 
@@ -1336,6 +1365,7 @@
 						{#each timeline as item (item.kind === 'message' ? item.message.id : item.transfer.id)}
 							{#if item.kind === 'message'}
 								{@const m = item.message}
+								{@const sendT = sendTransferById.get(m.id)}
 								<article
 									data-msg-id={m.id}
 									class:self={m.from === 'self'}
@@ -1369,10 +1399,30 @@
 											data={m.data}
 											w={m.w}
 											h={m.h}
-											progress={sendProgressById.get(m.id) ?? null}
+											progress={sendT && sendT.status !== 'failed' ? sendT.progress : null}
+										/>
+									{:else if m.type === 'file'}
+										<FileBubble
+											name={m.name}
+											size={m.data.byteLength}
+											data={m.data}
+											progress={sendT && sendT.status !== 'failed' ? sendT.progress : null}
 										/>
 									{:else}
 										<p>{m.body}</p>
+									{/if}
+									{#if sendT}
+										<span class={['xfer-status', sendT.status === 'failed' && 'failed']}>
+											{transferStatusText(sendT)}
+											{#if sendT.status === 'failed'}
+												<button
+													type="button"
+													class="xfer-retry"
+													onclick={() => connectionManager.retryTransfer(bucketId, m.id)}
+													>Retry</button
+												>
+											{/if}
+										</span>
 									{/if}
 									<time>{new Date(m.ts).toLocaleTimeString()}</time>
 									{#if key && !error && connState === 'open'}
@@ -1413,14 +1463,35 @@
 										</button>
 									{/if}
 									<span class="who">{t.from === 'self' ? 'You' : partnerLabelText}</span>
-									<ImageBubble
-										placeholder
-										mime={t.mime}
-										w={t.w}
-										h={t.h}
-										progress={t.progress}
-										alt="Receiving image"
-									/>
+									{#if t.kind === 'image'}
+										<ImageBubble
+											placeholder
+											mime={t.mime}
+											w={t.w}
+											h={t.h}
+											progress={t.progress}
+											alt="Receiving image"
+										/>
+									{:else}
+										<FileBubble name={t.name ?? 'file'} size={t.size} progress={t.progress} />
+									{/if}
+									<span class={['xfer-status', t.status === 'failed' && 'failed']}>
+										{transferStatusText(t)}
+										{#if t.status === 'failed'}
+											<button
+												type="button"
+												class="xfer-retry"
+												onclick={() => connectionManager.retryTransfer(bucketId, t.id)}
+												>Ask to resend</button
+											>
+											<button
+												type="button"
+												class="xfer-retry"
+												onclick={() => connectionManager.cancelTransfer(bucketId, t.id)}
+												>Dismiss</button
+											>
+										{/if}
+									</span>
 									<time>{new Date(t.ts).toLocaleTimeString()}</time>
 								</article>
 							{/if}
@@ -1483,16 +1554,15 @@
 							<input
 								bind:this={fileInput}
 								type="file"
-								accept="image/jpeg,image/png,image/webp,image/gif,image/*"
 								class="file-hidden"
-								onchange={onPickImage}
+								onchange={onPickFile}
 							/>
 							<div class="composer-row">
 								<button
 									type="button"
 									class="attach-btn"
-									aria-label="Attach image"
-									title="Attach image"
+									aria-label="Attach file (max 10 MB)"
+									title="Attach file (max 10 MB)"
 									disabled={!key || !!error || connState !== 'open' || imageSending}
 									onclick={() => fileInput?.click()}
 								>
@@ -1524,11 +1594,7 @@
 									disabled={!composerCanSend && !imageSending}
 								>
 									{#if imageSending}
-										{#if sendImagePercent != null}
-											<span class="send-pct" aria-hidden="true">{sendImagePercent}%</span>
-										{:else}
-											<span class="send-spinner" aria-hidden="true"></span>
-										{/if}
+										<span class="send-spinner" aria-hidden="true"></span>
 									{:else}
 										<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
 											<path
@@ -1607,7 +1673,7 @@
 						stroke-linejoin="round"
 					/>
 				</svg>
-				<p>Drop image to send</p>
+				<p>Drop file to send (max 10 MB)</p>
 			</div>
 		</div>
 	{/if}
@@ -2767,6 +2833,28 @@
 		text-align: left;
 	}
 
+	.xfer-status {
+		display: block;
+		margin-top: 0.3rem;
+		font-size: 0.72rem;
+		color: var(--muted);
+	}
+
+	.xfer-status.failed {
+		color: var(--danger);
+	}
+
+	.xfer-retry {
+		margin-left: 0.5rem;
+		padding: 0;
+		border: none;
+		background: none;
+		color: var(--accent);
+		font: inherit;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
 	.reply-btn,
 	.delete-btn {
 		display: inline-block;
@@ -3011,14 +3099,6 @@
 		border-top-color: #06110d;
 		border-radius: 50%;
 		animation: spin 0.7s linear infinite;
-	}
-
-	.send-pct {
-		font-size: 0.65rem;
-		font-weight: 700;
-		letter-spacing: -0.02em;
-		color: #06110d;
-		line-height: 1;
 	}
 
 	@keyframes spin {

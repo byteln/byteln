@@ -6,6 +6,9 @@ import {
 	bytesToBase64,
 	bytesToBase64Url,
 	exportKeyRaw,
+	isValidMime,
+	MAX_TRANSFER_BYTES,
+	sanitizeFileName,
 	type ContentPlainMessage,
 	type ImageMime,
 	type PlainMessage,
@@ -49,9 +52,34 @@ export type WireStoredMessage =
 			id: string;
 			from: 'self' | 'peer';
 			replyTo?: ReplyRef;
+	  }
+	| {
+			v: 1;
+			ts: number;
+			type: 'file';
+			name: string;
+			mime: string;
+			dataB64: string;
+			id: string;
+			from: 'self' | 'peer';
+			replyTo?: ReplyRef;
 	  };
 
 export function toWire(msg: StoredMessage): WireStoredMessage {
+	if (msg.type === 'file') {
+		const f: WireStoredMessage = {
+			v: 1,
+			ts: msg.ts,
+			type: 'file',
+			name: msg.name,
+			mime: msg.mime,
+			dataB64: bytesToBase64(msg.data),
+			id: msg.id,
+			from: msg.from
+		};
+		if (msg.replyTo) f.replyTo = msg.replyTo;
+		return f;
+	}
 	if (msg.type === 'image') {
 		const w: WireStoredMessage = {
 			v: 1,
@@ -97,17 +125,37 @@ export function fromWire(raw: unknown): StoredMessage | null {
 		}
 		const b64 = typeof m.dataB64 === 'string' ? m.dataB64 : '';
 		if (!b64) return null;
+		const data = base64ToBytes(b64);
+		if (data.byteLength > MAX_TRANSFER_BYTES) return null;
 		const msg: StoredMessage = {
 			v: 1,
 			ts: m.ts,
 			type: 'image',
 			mime,
-			data: base64ToBytes(b64),
+			data,
 			id: m.id,
 			from: m.from
 		};
 		if (typeof m.w === 'number') msg.w = m.w;
 		if (typeof m.h === 'number') msg.h = m.h;
+		if (replyTo) msg.replyTo = replyTo;
+		return msg;
+	}
+	if (m.type === 'file') {
+		if (typeof m.ts !== 'number' || !isValidMime(m.mime)) return null;
+		const b64 = typeof m.dataB64 === 'string' ? m.dataB64 : '';
+		const data = b64 ? base64ToBytes(b64) : new Uint8Array();
+		if (data.byteLength > MAX_TRANSFER_BYTES) return null;
+		const msg: StoredMessage = {
+			v: 1,
+			ts: m.ts,
+			type: 'file',
+			name: sanitizeFileName(m.name),
+			mime: m.mime,
+			data,
+			id: m.id,
+			from: m.from
+		};
 		if (replyTo) msg.replyTo = replyTo;
 		return msg;
 	}

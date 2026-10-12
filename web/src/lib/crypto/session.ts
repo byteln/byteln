@@ -3,18 +3,26 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** Max decoded image bytes after prepare (3 MiB). */
-export const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
+/** Max bytes for any image or file attachment (10 MiB). */
+export const MAX_TRANSFER_BYTES = 10 * 1024 * 1024;
+/** Max decoded image bytes after prepare. */
+export const MAX_IMAGE_BYTES = MAX_TRANSFER_BYTES;
 /** Client ciphertext ceiling — under relay 4 MiB MaxFrameBytes. */
 export const MAX_CIPHERTEXT_BYTES = Math.floor(3.9 * 1024 * 1024);
 /** Plaintext payload per image/history chunk frame (keeps count under relay MaxBufferFrames). */
 export const IMAGE_CHUNK_PAYLOAD_BYTES = 256 * 1024;
 /** Alias — history sync uses the same chunk size. */
 export const HISTORY_CHUNK_PAYLOAD_BYTES = IMAGE_CHUNK_PAYLOAD_BYTES;
+/** Plaintext payload per attachment transfer chunk. */
+export const TRANSFER_CHUNK_BYTES = IMAGE_CHUNK_PAYLOAD_BYTES;
+export const MAX_TRANSFER_CHUNKS = Math.ceil(MAX_TRANSFER_BYTES / TRANSFER_CHUNK_BYTES);
+export const MAX_FILE_NAME_LENGTH = 200;
+const MAX_MIME_LENGTH = 100;
 
 const IMAGE_PLAIN_MARK = 0x02;
 const IMAGE_CHUNK_MARK = 0x03;
 const HISTORY_CHUNK_MARK = 0x04;
+const TRANSFER_CHUNK_MARK = 0x05;
 
 export async function generateSessionKey(): Promise<CryptoKey> {
 	return crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, [
@@ -74,6 +82,18 @@ export type ImagePlainMessage = {
 	w?: number;
 	h?: number;
 	/** Shared across peers; optional when decoding legacy ciphertext. */
+	id?: string;
+	replyTo?: ReplyRef;
+};
+
+/** Arbitrary file attachment; rendered as a download card, never inline. */
+export type FilePlainMessage = {
+	v: 1;
+	ts: number;
+	type: 'file';
+	name: string;
+	mime: string;
+	data: Uint8Array;
 	id?: string;
 	replyTo?: ReplyRef;
 };
@@ -169,7 +189,66 @@ export type HistoryChunkPlainMessage = {
 	compressedLength?: number;
 };
 
-export type ContentPlainMessage = TextPlainMessage | ImagePlainMessage;
+export type TransferKind = 'image' | 'file';
+
+/** Full transfer header, repeated on every chunk so any chunk can open a transfer. */
+export type TransferHeader = {
+	kind: TransferKind;
+	ts: number;
+	mime: string;
+	size: number;
+	/** SHA-256 of the whole payload (base64url). */
+	sha256: string;
+	name?: string;
+	w?: number;
+	h?: number;
+	replyTo?: ReplyRef;
+};
+
+/** Wire-only chunk of an image/file transfer with resend support. */
+export type TransferChunkPlainMessage = {
+	v: 1;
+	type: 'xfer_chunk';
+	id: string;
+	index: number;
+	total: number;
+	header: TransferHeader;
+	data: Uint8Array;
+};
+
+/** Receiver → sender: chunks held so far; `resend` asks for everything else. */
+export type TransferAckPlainMessage = {
+	v: 1;
+	ts: number;
+	type: 'xfer_ack';
+	id: string;
+	have: number[];
+	resend?: boolean;
+	done?: boolean;
+};
+
+/** Sender → receiver: ask for an ack (resume after reconnect / stall). */
+export type TransferQueryPlainMessage = {
+	v: 1;
+	ts: number;
+	type: 'xfer_query';
+	id: string;
+};
+
+export type TransferCancelPlainMessage = {
+	v: 1;
+	ts: number;
+	type: 'xfer_cancel';
+	id: string;
+	reason?: string;
+};
+
+export type TransferControlPlainMessage =
+	| TransferAckPlainMessage
+	| TransferQueryPlainMessage
+	| TransferCancelPlainMessage;
+
+export type ContentPlainMessage = TextPlainMessage | ImagePlainMessage | FilePlainMessage;
 export type SyncControlPlainMessage =
 	| HistoryDigestPlainMessage
 	| ResyncRequestPlainMessage
@@ -182,11 +261,20 @@ export type PlainMessage =
 	| DeletePlainMessage
 	| ImageChunkPlainMessage
 	| HistoryChunkPlainMessage
+	| TransferChunkPlainMessage
+	| TransferControlPlainMessage
 	| SyncControlPlainMessage;
 
 export function messagePreview(msg: PlainMessage): string {
 	if (msg.type === 'image' || msg.type === 'image_chunk') return '[Image]';
+	if (msg.type === 'file') return `[File] ${msg.name}`;
+	if (msg.type === 'xfer_chunk') {
+		return msg.header.kind === 'image' ? '[Image]' : `[File] ${msg.header.name ?? 'file'}`;
+	}
 	if (
+		msg.type === 'xfer_ack' ||
+		msg.type === 'xfer_query' ||
+		msg.type === 'xfer_cancel' ||
 		msg.type === 'delete' ||
 		msg.type === 'history_digest' ||
 		msg.type === 'resync_request' ||
@@ -215,6 +303,96 @@ function parseReplyTo(raw: unknown): ReplyRef | undefined {
 	return { id: r.id, preview: r.preview };
 }
 
+/**
+ * Display/download-safe file name: no path parts, control chars, or bidi overrides
+ * (e.g. U+202E used to disguise `evil‮fdp.exe` as `evilexe.pdf`).
+ */
+export function sanitizeFileName(raw: unknown): string {
+	const s = typeof raw === 'string' ? raw : '';
+	const base = s.split(/[\\/]/).pop() ?? '';
+	const cleaned = base
+		.normalize('NFC')
+		// eslint-disable-next-line no-control-regex
+		.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+		.replace(/[<>:"|?*]/g, '_')
+		.trim()
+		.replace(/^\.+/, '');
+	const trimmed = cleaned.slice(0, MAX_FILE_NAME_LENGTH).trim();
+	return trimmed || 'file';
+}
+
+export function isValidMime(m: unknown): m is string {
+	return (
+		typeof m === 'string' &&
+		m.length > 0 &&
+		m.length <= MAX_MIME_LENGTH &&
+		/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i.test(m)
+	);
+}
+
+/** Number of chunks a payload of `size` bytes must be split into (≥1). */
+export function transferChunkCount(size: number): number {
+	return Math.max(1, Math.ceil(size / TRANSFER_CHUNK_BYTES));
+}
+
+/** Exact byte length chunk `index` must carry for a payload of `size` bytes. */
+export function transferChunkLength(size: number, index: number): number {
+	const start = index * TRANSFER_CHUNK_BYTES;
+	return Math.max(0, Math.min(TRANSFER_CHUNK_BYTES, size - start));
+}
+
+function isPositiveDim(n: unknown): n is number {
+	return typeof n === 'number' && Number.isInteger(n) && n > 0 && n <= 100_000;
+}
+
+function parseTransferHeader(raw: unknown): TransferHeader {
+	if (!raw || typeof raw !== 'object') throw new Error('invalid transfer header');
+	const h = raw as Record<string, unknown>;
+	if (h.kind !== 'image' && h.kind !== 'file') throw new Error('invalid transfer header');
+	if (typeof h.ts !== 'number' || !Number.isFinite(h.ts)) throw new Error('invalid transfer header');
+	if (
+		typeof h.size !== 'number' ||
+		!Number.isInteger(h.size) ||
+		h.size < 0 ||
+		h.size > MAX_TRANSFER_BYTES
+	) {
+		throw new Error('invalid transfer size');
+	}
+	if (typeof h.sha256 !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(h.sha256)) {
+		throw new Error('invalid transfer header');
+	}
+	if (h.kind === 'image' ? !isImageMime(h.mime) : !isValidMime(h.mime)) {
+		throw new Error('invalid transfer mime');
+	}
+	const header: TransferHeader = {
+		kind: h.kind,
+		ts: h.ts,
+		mime: h.mime as string,
+		size: h.size,
+		sha256: h.sha256
+	};
+	if (h.kind === 'file') header.name = sanitizeFileName(h.name);
+	if (isPositiveDim(h.w)) header.w = h.w;
+	if (isPositiveDim(h.h)) header.h = h.h;
+	const replyTo = parseReplyTo(h.replyTo);
+	if (replyTo) header.replyTo = replyTo;
+	return header;
+}
+
+function parseChunkIndices(raw: unknown): number[] {
+	if (!Array.isArray(raw) || raw.length > MAX_TRANSFER_CHUNKS) {
+		throw new Error('invalid message schema');
+	}
+	const out: number[] = [];
+	for (const n of raw) {
+		if (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n >= MAX_TRANSFER_CHUNKS) {
+			throw new Error('invalid message schema');
+		}
+		out.push(n);
+	}
+	return out;
+}
+
 function encodeBinaryEnvelope(mark: number, metaObj: Record<string, unknown>, payload: Uint8Array): Uint8Array {
 	const meta = encoder.encode(JSON.stringify(metaObj));
 	if (meta.length > 0xffff) throw new Error('image meta too large');
@@ -228,6 +406,47 @@ function encodeBinaryEnvelope(mark: number, metaObj: Record<string, unknown>, pa
 }
 
 function encodePlaintext(msg: PlainMessage): Uint8Array {
+	if (msg.type === 'xfer_chunk') {
+		const header: Record<string, unknown> = {
+			kind: msg.header.kind,
+			ts: msg.header.ts,
+			mime: msg.header.mime,
+			size: msg.header.size,
+			sha256: msg.header.sha256
+		};
+		if (msg.header.name !== undefined) header.name = msg.header.name;
+		if (typeof msg.header.w === 'number') header.w = msg.header.w;
+		if (typeof msg.header.h === 'number') header.h = msg.header.h;
+		if (msg.header.replyTo) header.replyTo = msg.header.replyTo;
+		return encodeBinaryEnvelope(
+			TRANSFER_CHUNK_MARK,
+			{ v: 1, type: 'xfer_chunk', id: msg.id, index: msg.index, total: msg.total, header },
+			msg.data
+		);
+	}
+	if (msg.type === 'xfer_ack') {
+		const obj: Record<string, unknown> = {
+			v: 1,
+			ts: msg.ts,
+			type: 'xfer_ack',
+			id: msg.id,
+			have: msg.have
+		};
+		if (msg.resend) obj.resend = true;
+		if (msg.done) obj.done = true;
+		return encoder.encode(JSON.stringify(obj));
+	}
+	if (msg.type === 'xfer_query') {
+		return encoder.encode(JSON.stringify({ v: 1, ts: msg.ts, type: 'xfer_query', id: msg.id }));
+	}
+	if (msg.type === 'xfer_cancel') {
+		const obj: Record<string, unknown> = { v: 1, ts: msg.ts, type: 'xfer_cancel', id: msg.id };
+		if (msg.reason) obj.reason = msg.reason;
+		return encoder.encode(JSON.stringify(obj));
+	}
+	if (msg.type === 'file') {
+		throw new Error('file messages are sent as xfer_chunk frames');
+	}
 	if (msg.type === 'history_digest') {
 		const obj: Record<string, unknown> = {
 			v: 1,
@@ -354,7 +573,12 @@ function isImageMime(m: unknown): m is ImageMime {
 function decodePlaintext(pt: Uint8Array): PlainMessage {
 	if (pt.length === 0) throw new Error('invalid message schema');
 
-	if (pt[0] === IMAGE_PLAIN_MARK || pt[0] === IMAGE_CHUNK_MARK || pt[0] === HISTORY_CHUNK_MARK) {
+	if (
+		pt[0] === IMAGE_PLAIN_MARK ||
+		pt[0] === IMAGE_CHUNK_MARK ||
+		pt[0] === HISTORY_CHUNK_MARK ||
+		pt[0] === TRANSFER_CHUNK_MARK
+	) {
 		if (pt.length < 3) throw new Error('invalid image envelope');
 		const metaLen = ((pt[1]! << 8) | pt[2]!) >>> 0;
 		if (pt.length < 3 + metaLen) throw new Error('invalid image envelope');
@@ -365,6 +589,40 @@ function decodePlaintext(pt: Uint8Array): PlainMessage {
 			meta = JSON.parse(decoder.decode(metaBytes)) as Record<string, unknown>;
 		} catch {
 			throw new Error('invalid image meta');
+		}
+
+		if (pt[0] === TRANSFER_CHUNK_MARK) {
+			if (
+				meta.v !== 1 ||
+				meta.type !== 'xfer_chunk' ||
+				typeof meta.id !== 'string' ||
+				!meta.id ||
+				meta.id.length > 64 ||
+				typeof meta.index !== 'number' ||
+				typeof meta.total !== 'number' ||
+				!Number.isInteger(meta.index) ||
+				!Number.isInteger(meta.total) ||
+				meta.index < 0 ||
+				meta.index >= meta.total
+			) {
+				throw new Error('invalid message schema');
+			}
+			const header = parseTransferHeader(meta.header);
+			if (meta.total !== transferChunkCount(header.size)) {
+				throw new Error('invalid transfer chunk count');
+			}
+			if (data.byteLength !== transferChunkLength(header.size, meta.index)) {
+				throw new Error('invalid transfer chunk length');
+			}
+			return {
+				v: 1,
+				type: 'xfer_chunk',
+				id: meta.id,
+				index: meta.index,
+				total: meta.total,
+				header,
+				data
+			};
 		}
 
 		if (pt[0] === HISTORY_CHUNK_MARK) {
@@ -419,6 +677,7 @@ function decodePlaintext(pt: Uint8Array): PlainMessage {
 				!Number.isInteger(meta.total) ||
 				meta.index < 0 ||
 				meta.total < 1 ||
+				meta.total > MAX_TRANSFER_CHUNKS ||
 				meta.index >= meta.total
 			) {
 				throw new Error('invalid message schema');
@@ -478,6 +737,38 @@ function decodePlaintext(pt: Uint8Array): PlainMessage {
 	const parsed = JSON.parse(decoder.decode(pt)) as Record<string, unknown>;
 	if (parsed.v !== 1 || typeof parsed.ts !== 'number') {
 		throw new Error('invalid message schema');
+	}
+	if (
+		parsed.type === 'xfer_ack' ||
+		parsed.type === 'xfer_query' ||
+		parsed.type === 'xfer_cancel'
+	) {
+		if (typeof parsed.id !== 'string' || !parsed.id || parsed.id.length > 64) {
+			throw new Error('invalid message schema');
+		}
+		if (parsed.type === 'xfer_query') {
+			return { v: 1, ts: parsed.ts, type: 'xfer_query', id: parsed.id };
+		}
+		if (parsed.type === 'xfer_cancel') {
+			const out: TransferCancelPlainMessage = {
+				v: 1,
+				ts: parsed.ts,
+				type: 'xfer_cancel',
+				id: parsed.id
+			};
+			if (typeof parsed.reason === 'string') out.reason = parsed.reason.slice(0, 64);
+			return out;
+		}
+		const out: TransferAckPlainMessage = {
+			v: 1,
+			ts: parsed.ts,
+			type: 'xfer_ack',
+			id: parsed.id,
+			have: parseChunkIndices(parsed.have)
+		};
+		if (parsed.resend === true) out.resend = true;
+		if (parsed.done === true) out.done = true;
+		return out;
 	}
 	if (parsed.type === 'history_digest') {
 		if (typeof parsed.count !== 'number' || typeof parsed.idHash !== 'string' || !parsed.idHash) {
@@ -708,6 +999,11 @@ export async function decryptMessage(key: CryptoKey, buf: ArrayBuffer): Promise<
 	const ctCopy = new Uint8Array(ct);
 	const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivCopy }, key, ctCopy);
 	return decodePlaintext(new Uint8Array(pt));
+}
+
+export async function sha256Base64Url(data: Uint8Array): Promise<string> {
+	const digest = await crypto.subtle.digest('SHA-256', copyBytes(data));
+	return bytesToBase64Url(new Uint8Array(digest));
 }
 
 export function bytesToBase64Url(bytes: Uint8Array): string {

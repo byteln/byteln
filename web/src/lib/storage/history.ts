@@ -1,4 +1,5 @@
 import type { StoredMessage } from '$lib/crypto/backup';
+import { isValidMime, sanitizeFileName } from '$lib/crypto/session';
 import type { EncryptedBlob } from '$lib/crypto/vault';
 
 import { defaultLineNickname } from '$lib/brand';
@@ -61,6 +62,14 @@ function openDb(): Promise<IDBDatabase> {
 
 type Row = StoredMessage & { pk: string; bucketId: string };
 
+function rowBytes(row: Row): Uint8Array {
+	const raw = (row as { data?: unknown }).data;
+	if (raw instanceof Uint8Array) return raw;
+	if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
+	if (ArrayBuffer.isView(raw)) return new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+	return new Uint8Array();
+}
+
 function normalizeStored(row: Row): StoredMessage {
 	const { id, from, ts, type } = row;
 	const replyRaw = (row as { replyTo?: unknown }).replyTo;
@@ -71,18 +80,23 @@ function normalizeStored(row: Row): StoredMessage {
 			replyTo = { id: r.id, preview: r.preview };
 		}
 	}
+	if (type === 'file') {
+		const rawMime = (row as { mime?: unknown }).mime;
+		const msg: StoredMessage = {
+			id,
+			from,
+			v: 1,
+			ts,
+			type: 'file',
+			name: sanitizeFileName((row as { name?: unknown }).name),
+			mime: isValidMime(rawMime) ? rawMime : 'application/octet-stream',
+			data: rowBytes(row)
+		};
+		if (replyTo) msg.replyTo = replyTo;
+		return msg;
+	}
 	if (type === 'image') {
-		const raw = (row as { data?: unknown }).data;
-		let data: Uint8Array;
-		if (raw instanceof Uint8Array) {
-			data = raw;
-		} else if (raw instanceof ArrayBuffer) {
-			data = new Uint8Array(raw);
-		} else if (ArrayBuffer.isView(raw)) {
-			data = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
-		} else {
-			data = new Uint8Array();
-		}
+		const data = rowBytes(row);
 		const mime = (row as { mime?: string }).mime;
 		const msg: StoredMessage = {
 			id,
@@ -253,6 +267,33 @@ export async function resolveRelayUrl(fallback: string): Promise<string> {
 
 export async function setRelayUrl(url: string): Promise<void> {
 	await setMetaEntry('relayUrl', url.trim());
+}
+
+/** Outgoing attachment ids the peer has not confirmed yet (resumed after reload). */
+export async function getPendingOutgoing(bucketId: string): Promise<string[]> {
+	const row = await getMetaEntry(`pendingOut:${bucketId}`);
+	if (!row) return [];
+	try {
+		const ids = JSON.parse(row.value) as unknown;
+		return Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : [];
+	} catch {
+		return [];
+	}
+}
+
+export async function setPendingOutgoing(bucketId: string, ids: string[]): Promise<void> {
+	await setMetaEntry(`pendingOut:${bucketId}`, JSON.stringify(ids));
+}
+
+const SOUND_ENABLED_KEY = 'soundEnabled';
+
+export async function getSoundEnabled(): Promise<boolean> {
+	const row = await getMetaEntry(SOUND_ENABLED_KEY);
+	return row?.value !== '0';
+}
+
+export async function setSoundEnabled(enabled: boolean): Promise<void> {
+	await setMetaEntry(SOUND_ENABLED_KEY, enabled ? '1' : '0');
 }
 
 const INTRO_SEEN_KEY = 'introSeen';
